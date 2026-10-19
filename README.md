@@ -13,8 +13,6 @@ module discussed for Fluidum.jl. It **does not depend on Fluidum**.
   - `cell_isosurface` on one hypercube, as a fold over its pieces (`cell_isosurface(f, init, cornerT, cell, Tfo)`), a callback, an in-place push, or a returned vector;
   - `cell_corners`, `slab_corners` and `Cell` to gather a cell's corner values and geometry, e.g. from two consecutive hydro time slices;
   - `ReferenceGrid(Val(D))` for inspecting the reference geometry; `integrate_surface` for centroid quadrature.
-- **`walkthrough.jl`**: one-cell worked example printing every simplex and its hot/cold pattern for `D=2,3,4`.
-- **`demo.jl`**: ordinary usage examples.
 - **`test_simplicial_freezeout.jl`**: analytic tests (planar isotherms, affine field interpolation), a closed spherical isotherm (watertightness, orientation, divergence theorem), the single-cell API, streaming from two time slices, and the fold forms.
 - **`compare_cornelius.jl`**: comparison with Cornelius (P. Huovinen, H. Petersen, arXiv:1206.3371) on the same 4D field. The Cornelius source is not included: place `cornelius.f90` next to the script and it is compiled with gfortran on first use. On a spherical isotherm both give the same integrated dΣ and enclosed volume; Cornelius returns one element per crossing cell and is about twice as fast at extraction.
 - **`geometry_rectangle.png`, `geometry_tetrahedron.png`**: explanatory geometry figures.
@@ -25,9 +23,7 @@ From this folder:
 
 ```bash
 julia --project=. -e 'using Pkg; Pkg.instantiate()'   # once, installs dependencies
-julia --project=. walkthrough.jl
 julia --project=. test_simplicial_freezeout.jl
-julia --project=. demo.jl
 julia --project=. compare_cornelius.jl   # needs cornelius.f90 and gfortran
 ```
 
