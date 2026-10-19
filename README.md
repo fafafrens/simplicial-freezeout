@@ -139,9 +139,5 @@ and the fold lets you merge them per cell if you want Cornelius-sized output.
 - `example.jl`: runnable examples of a stored grid, a single cell, streaming
   from two time slices, and integrals on the fly with the fold.
 - `test_simplicial_freezeout.jl`, `compare_cornelius.jl`: see above.
-- `NOTES.md`: longer notes on the geometry, with figures
-  (`geometry_rectangle.png`, `geometry_tetrahedron.png`). They describe an
-  earlier version of the code: there the orientation comes from the
-  temperature gradient and the cut cases are tabulated by hand, whereas the
-  module now orients toward the coldest vertex and generates all cases from
-  staircase triangulations.
+- `geometry_rectangle.png`, `geometry_tetrahedron.png`: figures of the
+  reference simplices and an isothermal cut in 1+1D and 2+1D.
