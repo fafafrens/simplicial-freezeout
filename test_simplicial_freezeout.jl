@@ -1,5 +1,5 @@
 using Test
-include("SimplicialFreezeOut.jl")
+isdefined(Main, :SimplicialFreezeOut) || include(joinpath(@__DIR__, "SimplicialFreezeOut.jl"))   # once per session
 using .SimplicialFreezeOut
 
 @testset "Simplicial freeze-out in 1, 2 and 3 spatial dimensions" begin

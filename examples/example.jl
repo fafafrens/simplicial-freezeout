@@ -2,7 +2,9 @@
 # Run from the repository root:
 #   julia --project=examples -e 'using Pkg; Pkg.instantiate()'   # once
 #   julia --project=examples examples/example.jl
-include(joinpath(@__DIR__, "..", "SimplicialFreezeOut.jl"))
+# Load the module once per session: including it again would define a second
+# module with the same exports and make every exported name ambiguous on re-run.
+isdefined(Main, :SimplicialFreezeOut) || include(joinpath(@__DIR__, "..", "SimplicialFreezeOut.jl"))
 using .SimplicialFreezeOut, StaticArrays, LinearAlgebra
 using CairoMakie
 
@@ -18,7 +20,7 @@ function stored_grid()
     T  = [temperature_field(ti, xi, yi) for ti in t, xi in x, yi in y]
     ux = [0.1xi for ti in t, xi in x, yi in y]
     uy = [0.1yi for ti in t, xi in x, yi in y]
-    elements = SimplicialFreezeOut.isosurface(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
+    elements = isosurface(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
 
     e = first(elements)
     println("1. stored grid: ", length(elements), " oriented triangles")

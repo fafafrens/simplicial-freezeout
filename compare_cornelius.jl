@@ -4,7 +4,7 @@
 # Run from this folder:  julia --project=. compare_cornelius.jl
 # Requires cornelius.f90 (not included, see below) and gfortran; the library is
 # compiled on first use.
-include("SimplicialFreezeOut.jl")
+isdefined(Main, :SimplicialFreezeOut) || include(joinpath(@__DIR__, "SimplicialFreezeOut.jl"))   # once per session
 using .SimplicialFreezeOut, StaticArrays, LinearAlgebra, Printf, Libdl
 
 const CORNELIUS_SRC = joinpath(@__DIR__, "cornelius.f90")
