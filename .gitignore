@@ -1,5 +1,6 @@
 # Julia
 Manifest.toml
+examples/Manifest.toml
 *.jl.cov
 *.jl.mem
 

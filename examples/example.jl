@@ -1,7 +1,10 @@
-# Usage examples for SimplicialFreezeOut.
-# Run from this folder:  julia --project=. example.jl
-include("SimplicialFreezeOut.jl")
+# Usage examples for SimplicialFreezeOut, ending with a figure of the surface.
+# Run from the repository root:
+#   julia --project=examples -e 'using Pkg; Pkg.instantiate()'   # once
+#   julia --project=examples examples/example.jl
+include(joinpath(@__DIR__, "..", "SimplicialFreezeOut.jl"))
 using .SimplicialFreezeOut, StaticArrays, LinearAlgebra
+using CairoMakie
 
 # A cooling 2+1D fireball: energy-density-like temperature and a radial flow.
 temperature_field(t, x, y) = 1.3 - t - 0.15 * (x^2 + y^2)
@@ -105,3 +108,49 @@ flux = on_the_fly()
 @assert length(out) == length(surface)
 @assert flux ≈ sum(e.dsigma[1] for e in surface)
 println("checks passed: streamed and on-the-fly results match the stored-grid surface")
+
+# --- 5. A figure of the freeze-out surface ------------------------------------
+# Left: the surface in (x, y, t) as a triangle mesh, coloured by the flow speed
+# interpolated at each triangle. Right: freeze-out time against radius for every
+# element, on top of the exact isotherm t(r) = 1.3 - Tfo - 0.15 r².
+function plot_surface(path)
+    tf = range(0.0, 0.6; length=31); xf = range(-1.9, 1.9; length=61); yf = xf
+    T  = [temperature_field(ti, xi, yi) for ti in tf, xi in xf, yi in yf]
+    ux = [0.1xi for ti in tf, xi in xf, yi in yf]
+    uy = [0.1yi for ti in tf, xi in xf, yi in yf]
+    surface = isosurface(T, (tf, xf, yf), Tfo; fields=(ux=ux, uy=uy))
+
+    # One mesh vertex per triangle corner, so each triangle can carry its own colour.
+    points = [Point3f(v[2], v[3], v[1]) for e in surface for v in e.vertices]   # (x, y, t)
+    faces  = [CairoMakie.GeometryBasics.TriangleFace(3k - 2, 3k - 1, 3k) for k in eachindex(surface)]
+    speed  = [hypot(e.fields.ux, e.fields.uy) for e in surface for _ in 1:3]
+
+    # Sequential single-hue ramp, light (slow) to dark (fast).
+    blues = cgrad(["#b7d3f6", "#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281", "#0d366b"])
+    ink, muted = "#2b2b29", "#6b6b66"
+
+    fig = Figure(size=(1200, 540), backgroundcolor="#fcfcfb", fontsize=15, figure_padding=(36, 16, 12, 12))
+    ax3 = Axis3(fig[1, 1]; xlabel="x", ylabel="y", zlabel="t", azimuth=0.35π, elevation=0.17π,
+                aspect=(1, 1, 0.55), limits=(nothing, nothing, (0, 0.52)),
+                title="Freeze-out surface T = $Tfo", titlecolor=ink, titlealign=:left,
+                xgridcolor=(:black, 0.06), ygridcolor=(:black, 0.06), zgridcolor=(:black, 0.06),
+                xlabelcolor=muted, ylabelcolor=muted, zlabelcolor=muted)
+    m = mesh!(ax3, points, faces; color=speed, colormap=blues, shading=true)
+    Colorbar(fig[1, 2], m; label="flow speed |u|", labelcolor=muted, height=Relative(0.6))
+
+    r  = [hypot(e.centroid[2], e.centroid[3]) for e in surface]
+    tc = [e.centroid[1] for e in surface]
+    rr = range(0, maximum(r); length=200)
+    ax2 = Axis(fig[1, 3]; xlabel="r", ylabel="t", title="Freeze-out time against radius",
+               titlecolor=ink, titlealign=:left, xlabelcolor=muted, ylabelcolor=muted,
+               xgridcolor=(:black, 0.06), ygridcolor=(:black, 0.06), topspinevisible=false, rightspinevisible=false)
+    lines!(ax2, rr, 1.3 .- Tfo .- 0.15 .* rr .^ 2; color=(ink, 0.5), linewidth=8, label="exact isotherm")
+    scatter!(ax2, r, tc; color=blues[0.75], markersize=3, label="element centroids")
+    axislegend(ax2; position=:lb, framevisible=false, labelcolor=muted)
+
+    colsize!(fig.layout, 1, Relative(0.55))
+    save(path, fig; px_per_unit=2)
+    println("5. figure: ", length(surface), " triangles drawn, saved to ", path)
+end
+
+plot_surface(joinpath(@__DIR__, "freezeout_surface.png"))

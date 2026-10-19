@@ -13,15 +13,24 @@ watertight mesh. Each output element carries the integrated area covector
 `dΣ_μ` for Cooper–Frye integrals, its centroid, and the fields at the
 centroid.
 
+![Freeze-out surface of a cooling 2+1D fireball, coloured by flow speed, and the freeze-out time against radius on top of the exact isotherm](examples/freezeout_surface.png)
+
 ## Install and test
 
 ```bash
 julia --project=. -e 'using Pkg; Pkg.instantiate()'   # once
 julia --project=. test_simplicial_freezeout.jl
-julia --project=. example.jl                          # the usage examples below, runnable
 ```
 
 Dependencies: StaticArrays.jl and Combinatorics.jl.
+
+The examples, including the figure above, have their own environment because
+they also use CairoMakie:
+
+```bash
+julia --project=examples -e 'using Pkg; Pkg.instantiate()'   # once
+julia --project=examples examples/example.jl
+```
 
 ## Usage
 
@@ -136,8 +145,9 @@ and the fold lets you merge them per cell if you want Cornelius-sized output.
 ## Files
 
 - `SimplicialFreezeOut.jl`: the module, with docstrings carrying worked examples.
-- `example.jl`: runnable examples of a stored grid, a single cell, streaming
-  from two time slices, and integrals on the fly with the fold.
+- `examples/example.jl`: runnable examples of a stored grid, a single cell,
+  streaming from two time slices, and integrals on the fly with the fold,
+  ending with the figure `examples/freezeout_surface.png`.
 - `test_simplicial_freezeout.jl`, `compare_cornelius.jl`: see above.
 - `geometry_rectangle.png`, `geometry_tetrahedron.png`: figures of the
   reference simplices and an isothermal cut in 1+1D and 2+1D.
