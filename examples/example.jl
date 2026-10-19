@@ -18,17 +18,17 @@ function stored_grid()
     T  = [temperature_field(ti, xi, yi) for ti in t, xi in x, yi in y]
     ux = [0.1xi for ti in t, xi in x, yi in y]
     uy = [0.1yi for ti in t, xi in x, yi in y]
-    surface = isosurface(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
+    elements = SimplicialFreezeOut.isosurface(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
 
-    e = first(surface)
-    println("1. stored grid: ", length(surface), " oriented triangles")
+    e = first(elements)
+    println("1. stored grid: ", length(elements), " oriented triangles")
     println("   first element: vertices ", e.vertices)
     println("                  dΣ ", e.dsigma, ", ux ", e.fields.ux, ", uy ", e.fields.uy)
 
     # Centroid quadrature of a surface integral: flux of the current J = (1, 0, 0).
-    flux = integrate_surface(surface, e -> e.dsigma[1])
+    flux = integrate_surface(elements, e -> e.dsigma[1])
     println("   ∫ dΣ₀ over the surface = ", flux)
-    surface
+    elements
 end
 
 # --- 2. One cell, by hand -----------------------------------------------------
@@ -99,14 +99,14 @@ function on_the_fly()
     flux
 end
 
-surface = stored_grid()
+grid_elements = stored_grid()
 one_cell()
 out = streamed()
 flux = on_the_fly()
 
 # The three ways of extracting the 2+1D surface agree.
-@assert length(out) == length(surface)
-@assert flux ≈ sum(e.dsigma[1] for e in surface)
+@assert length(out) == length(grid_elements)
+@assert flux ≈ sum(e.dsigma[1] for e in grid_elements)
 println("checks passed: streamed and on-the-fly results match the stored-grid surface")
 
 # --- 5. A figure of the freeze-out surface ------------------------------------
@@ -118,12 +118,12 @@ function plot_surface(path)
     T  = [temperature_field(ti, xi, yi) for ti in tf, xi in xf, yi in yf]
     ux = [0.1xi for ti in tf, xi in xf, yi in yf]
     uy = [0.1yi for ti in tf, xi in xf, yi in yf]
-    surface = isosurface(T, (tf, xf, yf), Tfo; fields=(ux=ux, uy=uy))
+    elements = isosurface(T, (tf, xf, yf), Tfo; fields=(ux=ux, uy=uy))
 
     # One mesh vertex per triangle corner, so each triangle can carry its own colour.
-    points = [Point3f(v[2], v[3], v[1]) for e in surface for v in e.vertices]   # (x, y, t)
-    faces  = [CairoMakie.GeometryBasics.TriangleFace(3k - 2, 3k - 1, 3k) for k in eachindex(surface)]
-    speed  = [hypot(e.fields.ux, e.fields.uy) for e in surface for _ in 1:3]
+    points = [Point3f(v[2], v[3], v[1]) for e in elements for v in e.vertices]   # (x, y, t)
+    faces  = [CairoMakie.GeometryBasics.TriangleFace(3k - 2, 3k - 1, 3k) for k in eachindex(elements)]
+    speed  = [hypot(e.fields.ux, e.fields.uy) for e in elements for _ in 1:3]
 
     # Sequential single-hue ramp, light (slow) to dark (fast).
     blues = cgrad(["#b7d3f6", "#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281", "#0d366b"])
@@ -138,8 +138,8 @@ function plot_surface(path)
     m = mesh!(ax3, points, faces; color=speed, colormap=blues, shading=true)
     Colorbar(fig[1, 2], m; label="flow speed |u|", labelcolor=muted, height=Relative(0.6))
 
-    r  = [hypot(e.centroid[2], e.centroid[3]) for e in surface]
-    tc = [e.centroid[1] for e in surface]
+    r  = [hypot(e.centroid[2], e.centroid[3]) for e in elements]
+    tc = [e.centroid[1] for e in elements]
     rr = range(0, maximum(r); length=200)
     ax2 = Axis(fig[1, 3]; xlabel="r", ylabel="t", title="Freeze-out time against radius",
                titlecolor=ink, titlealign=:left, xlabelcolor=muted, ylabelcolor=muted,
@@ -150,7 +150,7 @@ function plot_surface(path)
 
     colsize!(fig.layout, 1, Relative(0.55))
     save(path, fig; px_per_unit=2)
-    println("5. figure: ", length(surface), " triangles drawn, saved to ", path)
+    println("5. figure: ", length(elements), " triangles drawn, saved to ", path)
 end
 
 plot_surface(joinpath(@__DIR__, "freezeout_surface.png"))
