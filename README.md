@@ -11,14 +11,14 @@ The method is the simplicial one: every grid cell is cut into `D!` simplices
 and its isotherm is a flat piece, and the pieces of all cells join into a
 watertight mesh. Each output element carries the integrated area covector
 `dΣ_μ` for Cooper–Frye integrals, its centroid, and the fields at the
-centroid. The notes in `Simplicial_Freezeout_Explained.pdf` explain the
-geometry with figures.
+centroid.
 
 ## Install and test
 
 ```bash
 julia --project=. -e 'using Pkg; Pkg.instantiate()'   # once
 julia --project=. test_simplicial_freezeout.jl
+julia --project=. example.jl                          # the usage examples below, runnable
 ```
 
 Dependencies: StaticArrays.jl and Combinatorics.jl.
@@ -136,10 +136,12 @@ and the fold lets you merge them per cell if you want Cornelius-sized output.
 ## Files
 
 - `SimplicialFreezeOut.jl`: the module, with docstrings carrying worked examples.
+- `example.jl`: runnable examples of a stored grid, a single cell, streaming
+  from two time slices, and integrals on the fly with the fold.
 - `test_simplicial_freezeout.jl`, `compare_cornelius.jl`: see above.
-- `Simplicial_Freezeout_Explained.pdf`, `.tex`, `NOTES.md`: the notes with
-  figures (`geometry_rectangle.png`, `geometry_tetrahedron.png`). They
-  describe an earlier version of the code: there the orientation comes from
-  the temperature gradient and the cut cases are tabulated by hand, whereas
-  the module now orients toward the coldest vertex and generates all cases
-  from staircase triangulations.
+- `NOTES.md`: longer notes on the geometry, with figures
+  (`geometry_rectangle.png`, `geometry_tetrahedron.png`). They describe an
+  earlier version of the code: there the orientation comes from the
+  temperature gradient and the cut cases are tabulated by hand, whereas the
+  module now orients toward the coldest vertex and generates all cases from
+  staircase triangulations.
