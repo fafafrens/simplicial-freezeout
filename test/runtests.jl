@@ -142,28 +142,43 @@ end
     q = [affine((ti, xi, yi)) for ti in t, xi in x, yi in y]
     simplices = surface_simplices(T, (t, x, y), 0.45; fields=(q=q,))
 
-    for block in (1, 2, (3, 1, 2), 100)
-        merged = surface_elements(T, (t, x, y), 0.45; fields=(q=q,), block)
-        # dΣ and areas add up exactly, whatever the blocks
-        @test sum(e.dsigma for e in merged) ≈ sum(e.dsigma for e in simplices)
-        @test sum(e.area for e in merged) ≈ sum(norm(e.dsigma) for e in simplices)
-        # an affine field is the field at the merged centroid
-        @test all(e.fields.q ≈ affine(e.centroid) for e in merged)
-        @test all(0 < flatness(e) <= 1 + 1e-12 for e in merged)
-        @test integrate_surface(merged, e -> e.dsigma[1]) ≈ integrate_surface(simplices, e -> e.dsigma[1])
-    end
     per_cell = surface_elements(T, (t, x, y), 0.45; fields=(q=q,))
-    whole = only(surface_elements(T, (t, x, y), 0.45; fields=(q=q,), block=100))
+    # dΣ and areas add up exactly
+    @test sum(e.dsigma for e in per_cell) ≈ sum(e.dsigma for e in simplices)
+    @test sum(e.area for e in per_cell) ≈ sum(norm(e.dsigma) for e in simplices)
+    # an affine field is the field at the merged centroid
+    @test all(e.fields.q ≈ affine(e.centroid) for e in per_cell)
+    @test all(0 < flatness(e) <= 1 + 1e-12 for e in per_cell)
+    @test integrate_surface(per_cell, e -> e.dsigma[1]) ≈ integrate_surface(simplices, e -> e.dsigma[1])
     @test length(per_cell) < length(simplices)
-    @test flatness(whole) < 0.99                       # the whole surface is visibly curved
 
-    # Merging is associative: merging merged cells equals merging every piece at once.
+    # Merging is associative: merging the merged cells equals merging every piece at once.
+    whole = foldl(merge_element, simplices; init=zero(element_type(3, (:q,))))
     remerged = foldl(merge_element, per_cell; init=zero(element_type(3, (:q,))))
     @test remerged.centroid ≈ whole.centroid && remerged.dsigma ≈ whole.dsigma &&
           remerged.area ≈ whole.area && remerged.fields.q ≈ whole.fields.q
+    @test flatness(whole) < 0.99                       # the whole surface is visibly curved
 
-    # A strict flatness threshold splits curved blocks back into single cells.
-    @test length(surface_elements(T, (t, x, y), 0.45; fields=(q=q,), block=100, min_flatness=1.0)) == length(per_cell)
+    # A block of cells merged at once, one at a time, or from its per-cell elements.
+    block = CartesianIndices((2:4, 3:4, 1:2))
+    cornerTs = [cell_corners(T, I) for I in block]
+    cells = [Cell((t, x, y), I) for I in block]
+    cell_fields = [(q=cell_corners(q, I),) for I in block]
+    together = surface_element(cornerTs, cells, 0.45; fields=cell_fields)
+    one_by_one = foldl((acc, i) -> surface_element(acc, cornerTs[i], cells[i], 0.45; fields=cell_fields[i]),
+                       eachindex(cells); init=zero(element_type(3, (:q,))))
+    @test together == one_by_one
+    from_elements = foldl(merge_element, (surface_element(cornerTs[i], cells[i], 0.45; fields=cell_fields[i]) for i in eachindex(cells));
+                          init=zero(element_type(3, (:q,))))
+    @test from_elements.centroid ≈ together.centroid && from_elements.dsigma ≈ together.dsigma &&
+          from_elements.area ≈ together.area && from_elements.fields.q ≈ together.fields.q
+    @test together.fields.q ≈ affine(together.centroid)
+    @test !iszero(together) && iszero(surface_element(cornerTs, cells, 5.0; fields=cell_fields))
+    @test surface_element(cornerTs, Tuple(cells), 0.45).dsigma ≈ together.dsigma        # tuples of cells, no fields
+    # the docstring example: two unit squares stacked along x
+    two = surface_element([Tuple(1.5 - t for t in 0:1, x in 0:1) for _ in 1:2],
+                          [Cell((0.0, 0.0), (1.0, 1.0)), Cell((0.0, 1.0), (1.0, 1.0))], 1.0)
+    @test two.centroid ≈ [0.5, 1.0] && two.dsigma ≈ [2.0, 0.0] && two.area ≈ 2.0
 end
 
 println("All simplicial freeze-out geometry tests passed.")

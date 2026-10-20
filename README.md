@@ -106,22 +106,27 @@ surface holds about 30 simplices in 3+1D. `surface_element` merges them into
 one `SurfaceElement`, like the element Cornelius returns per cell:
 `dsigma` is their summed area covector, `area` the sum of their areas, and
 `centroid` and `fields` are area-weighted means. On a grid,
-`surface_elements` returns one element per block of cells.
+`surface_elements` returns one element per crossed cell.
 
 ```julia
-elements = surface_elements(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))                    # one per cell
-elements = surface_elements(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy), block=(4, 1, 1))   # 4 cells in time
-e = surface_element(cornerT, cell, Tfo; fields, reference=ref)    # one cell; iszero(e) if not crossed
+elements = surface_elements(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))   # one per cell
+e = surface_element(cornerT, cell, Tfo; fields, reference=ref)          # one cell; iszero(e) if not crossed
+
+# a block of cells, here 4 cells in time, merged into one element
+B = CartesianIndices((1:4, 10:10, 7:7))
+e = surface_element([cell_corners(T, I) for I in B], [Cell((t, x, y), I) for I in B], Tfo;
+                    fields=[(ux=cell_corners(ux, I), uy=cell_corners(uy, I)) for I in B])
 ```
 
 Merging keeps the total `dΣ_μ` exactly and reproduces affine fields at the
 merged centroid; the quadrature error grows like the square of the block
 width. Fields are averaged component by component, so rebuild nonlinear
 quantities from the averages, e.g. `u⁰` from averaged spatial components.
-`flatness(e)` is 1 for a flat element and lower for a curved one, and
-`min_flatness` keeps full resolution in blocks that bend. `merge_element` is
-the fold step, so `surface_simplices(merge_element, zero(element_type(D, fields)), ...)`
-merges by hand, e.g. across time steps while streaming.
+`merge_element` is the fold step, and merging is associative: elements can
+be merged again, e.g. `foldl(merge_element, elements; init=zero(eltype(elements)))`,
+or cell by cell while streaming with `surface_element(acc, cornerT, cell, Tfo)`.
+`flatness(e)` is 1 for a flat element and lower for a curved one, so it
+tells whether a block was small enough to merge.
 
 **Choosing the resolution.** Decimation thins the input grid; merging
 combines the output. A sensible order:
@@ -131,9 +136,9 @@ combines the output. A sensible order:
    temperature far better in time than the grid does in space.
 2. Merge per cell with `surface_elements` for Cooper–Frye. It cuts the output
    about thirtyfold in 3+1D, and the error it adds is well below that of the grid itself.
-3. If that is still too many elements, merge larger blocks rather than
-   decimating the spatial grid. The geometry then still comes from the full
-   grid, so small hot spots cannot fall between coarse grid points.
+3. If that is still too many elements, merge blocks of cells as above
+   rather than decimating the spatial grid. The geometry then still comes
+   from the full grid, so small hot spots cannot fall between coarse grid points.
 
 ## Conventions
 
@@ -158,12 +163,15 @@ combines the output. A sensible order:
    the isotherm crosses and how the crossing points are joined into
    `(D-1)`-simplices. The 2-vs-2 and 2-vs-3 cuts are triangulated by
    staircases too, which is what makes neighbouring simplices agree on
-   shared faces.
+   shared faces. The edges of each piece are stored in the order that makes
+   it point from hot to cold. Since the temperature is affine in a simplex,
+   that order depends only on the pattern and on whether the simplex is
+   left- or right-handed, so no orientation test is needed per cell.
 2. For each cell, cells the level does not reach are rejected by a min/max
    test; otherwise each simplex looks up its pattern and builds its pieces:
    crossing points by linear interpolation along the edges, area covector as
-   a generalized cross product, orientation toward the coldest vertex, fields
-   from the barycentric weights of the centroid.
+   a generalized cross product, and fields at the centroid as the mean of
+   their values at the crossing points.
 
 Output simplices are segments for `D=2`, triangles for `D=3`, tetrahedra for
 `D=4`. Do not confuse them with the input simplices: in `D=3` the input
@@ -197,14 +205,14 @@ the grid spacing `h`, and converge to the same surface integrals:
 
 The table gives the relative error of a smooth surface integral of `dΣ₀`
 against its extrapolation to `h → 0`. Merged elements are as many as
-Cornelius elements, one per crossing cell. Cornelius extracts about 2.5
-times faster; timings on the 41⁴ grid on an Apple M4 Max:
+Cornelius elements, one per crossing cell, and take about as long to
+extract; timings on the 41⁴ grid on one core of an Apple M4 Max:
 
 | | elements | time |
 |---|---|---|
 | Cornelius | 95,448 | 0.14 s |
-| `surface_elements` | 95,448 | 0.34 s |
-| `surface_simplices` | 2,944,344 | 0.29 s |
+| `surface_elements` | 95,448 | 0.13 s |
+| `surface_simplices` | 2,944,344 | 0.19 s |
 
 ## Files
 
