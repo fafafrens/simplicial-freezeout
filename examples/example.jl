@@ -12,11 +12,14 @@ const t = range(0.0, 1.0; length=9)
 const x = range(-1.0, 1.0; length=17)
 const y = x
 
+# The fields on the stored spacetime grid, time first.
+grid_fields() = ([temperature_field(ti, xi, yi) for ti in t, xi in x, yi in y],
+                 [0.1xi for ti in t, xi in x, yi in y],
+                 [0.1yi for ti in t, xi in x, yi in y])
+
 # --- 1. A stored spacetime grid ----------------------------------------------
 function stored_grid()
-    T  = [temperature_field(ti, xi, yi) for ti in t, xi in x, yi in y]
-    ux = [0.1xi for ti in t, xi in x, yi in y]
-    uy = [0.1yi for ti in t, xi in x, yi in y]
+    T, ux, uy = grid_fields()
     simplices = surface_simplices(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
 
     e = first(simplices)
@@ -98,17 +101,48 @@ function on_the_fly()
     flux
 end
 
+# --- 5. Merged elements: one per cell, or one per block of cells -------------
+# Like Cornelius, one element per crossed cell: the cell's triangles merged, with
+# their summed dΣ and area-weighted centroid and fields. Blocks of cells merge
+# the same way, and merging is associative.
+function merged()
+    T, ux, uy = grid_fields()
+    elements = surface_elements(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
+    println("5. merged: ", length(elements), " elements, one per crossed cell")
+    println("   ∫ dΣ₀ = ", integrate_surface(elements, e -> e.dsigma[1]),
+            ", lowest flatness ", minimum(flatness, elements))
+
+    # A column of 2×2 spatial cells over all times, merged into one element.
+    # Only the cells the surface crosses contribute.
+    ref = ReferenceGrid(Val(3))
+    block = CartesianIndices((1:length(t)-1, 12:13, 12:13))
+    cornerTs = [cell_corners(T, I) for I in block]
+    cells = [Cell((t, x, y), I) for I in block]
+    fields = [(ux=cell_corners(ux, I), uy=cell_corners(uy, I)) for I in block]
+    e = surface_element(cornerTs, cells, Tfo; fields, reference=ref)
+    println("   2×2 block: centroid ", e.centroid, ", dΣ ", e.dsigma, ", flatness ", flatness(e))
+    println("              ux ", e.fields.ux, ", uy ", e.fields.uy, " (exactly 0.1 x and 0.1 y at the centroid)")
+
+    # The same element from the block's per-cell elements, merged with merge_element.
+    per_cell = [surface_element(cornerTs[k], cells[k], Tfo; fields=fields[k], reference=ref) for k in eachindex(cells)]
+    again = foldl(merge_element, per_cell; init=zero(element_type(3, (:ux, :uy))))
+    @assert again.dsigma ≈ e.dsigma && again.centroid ≈ e.centroid
+    elements
+end
+
 grid_simplices = stored_grid()
 one_cell()
 out = streamed()
 flux = on_the_fly()
+elements = merged()
 
-# The three ways of extracting the 2+1D surface agree.
+# The ways of extracting the 2+1D surface agree; merging keeps the total dΣ.
 @assert length(out) == length(grid_simplices)
 @assert flux ≈ sum(e.dsigma[1] for e in grid_simplices)
-println("checks passed: streamed and on-the-fly results match the stored-grid surface")
+@assert sum(e.dsigma for e in elements) ≈ sum(e.dsigma for e in grid_simplices)
+println("checks passed: streamed, on-the-fly and merged results match the stored-grid surface")
 
-# --- 5. A figure of the freeze-out surface ------------------------------------
+# --- 6. A figure of the freeze-out surface ------------------------------------
 # Left: the surface in (x, y, t) as a triangle mesh, coloured by the flow speed
 # interpolated at each triangle. Right: freeze-out time against radius for every
 # element, on top of the exact isotherm t(r) = 1.3 - Tfo - 0.15 r².
@@ -149,7 +183,7 @@ function plot_surface(path)
 
     colsize!(fig.layout, 1, Relative(0.55))
     save(path, fig; px_per_unit=2)
-    println("5. figure: ", length(simplices), " triangles drawn, saved to ", path)
+    println("6. figure: ", length(simplices), " triangles drawn, saved to ", path)
 end
 
 plot_surface(joinpath(@__DIR__, "freezeout_surface.png"))

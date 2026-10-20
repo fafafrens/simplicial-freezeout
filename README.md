@@ -220,8 +220,9 @@ extract; timings on the 41⁴ grid on one core of an Apple M4 Max:
 - `src/SimplicialFreezeOut.jl`: the module, with docstrings carrying worked examples.
 - `test/runtests.jl`: the test suite, run by `Pkg.test()`.
 - `examples/example.jl`: runnable examples of a stored grid, a single cell,
-  streaming from two time slices, and integrals on the fly with the fold,
-  ending with the figure `examples/freezeout_surface.png`.
+  streaming from two time slices, integrals on the fly with the fold, and
+  merged elements per cell and per block of cells, ending with the figure
+  `examples/freezeout_surface.png`.
 - `benchmark/compare_cornelius.jl`: the comparison with Cornelius, run with
   `julia --project=. benchmark/compare_cornelius.jl`.
 - `geometry_rectangle.png`, `geometry_tetrahedron.png`: figures of the
