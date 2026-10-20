@@ -135,7 +135,7 @@ r41 = results[41].r
         sum(Δ) / sum(norm(b[1]) for b in r41.merged))
 q = (results[41].h / results[81].h)^2
 exact = results[81].r.Iu + (results[81].r.Iu - r41.Iu) / (q - 1)   # Richardson, error ∝ h²
-@printf("relative error of ∫ weight dΣ₀ against its h → 0 extrapolation %.7f\n", exact)
+@printf("∫ weight dΣ₀ extrapolated to h → 0: %.7f; relative errors:\n", exact)
 @printf("  %-7s %11s %11s %11s\n", "h", "Cornelius", "merged", "simplices")
 for n in (41, 81)
     r = results[n].r

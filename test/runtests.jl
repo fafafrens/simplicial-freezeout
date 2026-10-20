@@ -1,5 +1,7 @@
 using SimplicialFreezeOut
-using Test, StaticArrays, LinearAlgebra
+using SimplicialFreezeOut: from_bits, to_bits, linear_index, corners, case_index, hot_pattern,
+                           vertex_values, lerp, intersection_pieces, area_covector
+using Test, StaticArrays, LinearAlgebra, Random
 
 @testset "Simplicial freeze-out in 1, 2 and 3 spatial dimensions" begin
     for D in 2:4
@@ -175,10 +177,202 @@ end
     @test together.fields.q ≈ affine(together.centroid)
     @test !iszero(together) && iszero(surface_element(cornerTs, cells, 5.0; fields=cell_fields))
     @test surface_element(cornerTs, Tuple(cells), 0.45).dsigma ≈ together.dsigma        # tuples of cells, no fields
+    @test_throws DimensionMismatch surface_element(cornerTs[1:end-1], cells, 0.45)
+    @test_throws DimensionMismatch surface_element(cornerTs, cells, 0.45; fields=cell_fields[1:end-1])
+    @test iszero(surface_element(cornerTs[1:0], cells[1:0], 0.45; fields=cell_fields[1:0]))
     # the docstring example: two unit squares stacked along x
     two = surface_element([Tuple(1.5 - t for t in 0:1, x in 0:1) for _ in 1:2],
                           [Cell((0.0, 0.0), (1.0, 1.0)), Cell((0.0, 1.0), (1.0, 1.0))], 1.0)
     @test two.centroid ≈ [0.5, 1.0] && two.dsigma ≈ [2.0, 0.0] && two.area ≈ 2.0
+end
+
+@testset "Corner indexing and reference tables" begin
+    # The examples in the docstrings.
+    @test from_bits((1, 0, 1)) == 5 && to_bits(5, 4) == (true, false, true, false)
+    @test linear_index(Corner((1, 0, 1))) == 6 && Corner(6, Val(3)).bits == (1, 0, 1)
+    A = [10 30; 20 40]
+    @test A[Corner((1, 0))] == 20 && Corner(4, Val(2)).bits == (1, 1)
+    @test map(c -> c.bits, corners(Val(2))) == ((0, 0), (1, 0), (0, 1), (1, 1))
+    @test cell_corners(A, CartesianIndex(1, 1)) == (10.0, 20.0, 30.0, 40.0)
+    @test case_index((false, true, true, false)) == 7 && case_index((true, true, true, true)) == 16
+    triangle = (Corner((0, 0)), Corner((1, 0)), Corner((1, 1)))
+    @test vertex_values((10, 20, 30, 40), triangle) == (10.0, 20.0, 40.0)
+    @test lerp(map(SimplicialFreezeOut.coordinates, triangle), (1, 3), 0.25) ≈ [0.25, 0.25]
+    cell = Cell(([0.0, 0.5, 1.0], [-1.0, 0.0, 1.0]), CartesianIndex(2, 1))
+    @test cell.origin == [0.5, -1.0] && cell.width == (0.5, 1.0)
+    @test SimplicialFreezeOut.position(cell, SVector(1, 1)) == [1.0, 0.0]
+    @test intersection_pieces((true, true, false, false)) == [((1, 3), (2, 3), (2, 4)), ((1, 3), (1, 4), (2, 4))]
+
+    for D in 2:5
+        N = D + 1
+        reference = ReferenceGrid(Val(D))
+        @test all(hot_pattern(case_index(p), Val(D)) == p for p in map(i -> hot_pattern(i, Val(D)), 1:2^N))
+        @test all(linear_index(Corner(i, Val(D))) == i for i in 1:2^D)
+        # Every simplex is a staircase from 0…0 to 1…1, and half of them are left-handed.
+        @test allunique(reference.simplices)
+        @test all(s[1].bits == ntuple(_ -> 0, D) && s[end].bits == ntuple(_ -> 1, D) &&
+                  all(sum(s[a+1].bits .- s[a].bits) == 1 for a in 1:D) for s in reference.simplices)
+        @test count(reference.left_handed) == factorial(D) ÷ 2
+        # A k-vs-(N-k) cut has binomial(N-2, k-1) pieces, each joining hot to cold vertices.
+        for i in 1:2^N
+            is_hot = hot_pattern(i, Val(D))
+            k = min(count(is_hot), N - count(is_hot))
+            pieces = reference.cases[i]
+            @test length(pieces) == (k == 0 ? 0 : binomial(N - 2, k - 1))
+            @test all(is_hot[a] != is_hot[b] for piece in pieces for (a, b) in piece)
+            @test allunique(map(Set, pieces))
+        end
+    end
+    @test_throws ArgumentError ReferenceGrid(Val(1))
+end
+
+@testset "Area covector" begin
+    rng = Xoshiro(1)
+    for D in 2:5, _ in 1:20
+        v = ntuple(_ -> SVector{D}(randn(rng, D)), D)
+        dσ = area_covector(v)
+        E = hcat(ntuple(a -> v[a+1] - v[1], D - 1)...)
+        @test all(abs(dot(dσ, E[:, a])) < 1e-12 * norm(E)^D for a in 1:D-1)     # normal to the simplex
+        @test norm(dσ) ≈ sqrt(det(E' * E)) / factorial(D - 1)                  # its (D-1)-volume
+        @test det([dσ E]) > 0                                                  # the sign convention
+        # the written-out D = 3 and 4 forms agree with the general one
+        @test invoke(area_covector, Tuple{NTuple{n,SVector{n,Float64}} where n}, v) ≈ dσ
+    end
+    @test area_covector((SVector(0.0, 0.0), SVector(2.0, 0.0))) == [0.0, -2.0]
+    @test area_covector((SVector(0.0, 0.0, 0.0), SVector(1.0, 0.0, 0.0), SVector(0.0, 1.0, 0.0))) == [0.0, 0.0, 0.5]
+end
+
+@testset "Affine temperature: orientation in every dimension and cell orientation" begin
+    # An affine T is cut by one plane. Every piece must lie on it and point from
+    # hot to cold, whatever the dimension and the signs of the cell widths
+    # (a negative width mirrors the cell). Random gradients reach every
+    # hot/cold pattern of every simplex.
+    rng = Xoshiro(2)
+    for D in 2:5
+        reference = ReferenceGrid(Val(D))
+        for signs in Iterators.product(ntuple(_ -> (1, -1), D)...), _ in 1:3
+            g = SVector{D}(randn(rng, D)); c = randn(rng)
+            q(x) = 1.0 + dot(SVector{D}(1:D), x)                                 # an affine field
+            cell = Cell(SVector{D}(randn(rng, D)), signs .* (0.5 .+ rand(rng, D)))
+            X = map(k -> SimplicialFreezeOut.position(cell, SimplicialFreezeOut.coordinates(k)), corners(Val(D)))
+            cornerT = map(x -> c + dot(g, x), X)
+            Tfo = c + dot(g, cell.origin + SVector(cell.width) / 2) + 0.2 * randn(rng) * norm(g)
+            pieces = surface_simplices(cornerT, cell, Tfo; fields=(q=map(q, X),), reference)
+            minimum(cornerT) < Tfo < maximum(cornerT) || continue
+            @test !isempty(pieces)
+            @test all(abs(c + dot(g, v) - Tfo) < 1e-10 for e in pieces for v in e.vertices)
+            @test all(e.dsigma ≈ -norm(e.dsigma) * g / norm(g) for e in pieces)
+            @test all(e.fields.q ≈ q(e.centroid) for e in pieces)
+            e = surface_element(cornerT, cell, Tfo; fields=(q=map(q, X),), reference)
+            @test flatness(e) ≈ 1 && e.fields.q ≈ q(e.centroid)
+        end
+    end
+end
+
+# Closed surface checks: every (D-2)-face shared by exactly two pieces, and Σ dΣ = 0.
+function face_counts(simplices)
+    faces = Dict{Any,Int}()
+    D = length(first(simplices).vertices)
+    for e in simplices, drop in 1:D
+        key = Tuple(sort([round.(e.vertices[i]; digits=8) for i in 1:D if i != drop]))
+        faces[key] = get(faces, key, 0) + 1
+    end
+    values(faces)
+end
+
+@testset "Closed surfaces in 3+1D" begin
+    x = collect(range(-1.0, 1.0; length=17))
+    # A Gaussian with a cross term, not affine inside cells: its isotherm is the
+    # ellipsoid rᵀAr = R² with A = 1 - 0.3(e_t e_xᵀ + e_x e_tᵀ), all cut patterns occur.
+    R² = 0.4863
+    gaussian(x) = [exp(-(t^2 + a^2 + b^2 + c^2) + 0.6t * a) for t in x, a in x, b in x, c in x]
+    simplices = surface_simplices(gaussian(x), (x, x, x, x), exp(-R²))
+    @test all(==(2), face_counts(simplices))
+    @test norm(sum(e.dsigma for e in simplices)) < 1e-12
+    # The enclosed volume, (1/4)∮ x·dΣ, converges to the ellipsoid's at second order in h.
+    volume(x) = sum(dot(e.centroid, e.dsigma) for e in surface_simplices(gaussian(x), (x, x, x, x), exp(-R²))) / 4
+    exact = π^2 / 2 * R²^2 / sqrt(1 - 0.09)
+    coarse, fine = volume(collect(range(-1.0, 1.0; length=9))) - exact, volume(x) - exact
+    @test abs(fine / exact) < 0.04 && 3.5 < coarse / fine < 4.5
+
+    # T = 1 - r² with grid nodes exactly at Tfo: zero-area pieces dropped, still closed.
+    x = collect(range(-1.0, 1.0; length=9))
+    T = [1.0 - (t^2 + a^2 + b^2 + c^2) for t in x, a in x, b in x, c in x]
+    simplices = surface_simplices(T, (x, x, x, x), 0.5)
+    @test any(==(0.5), T)
+    @test all(allunique(e.vertices) && norm(e.dsigma) > 0 for e in simplices)
+    @test all(==(2), face_counts(simplices))
+    @test norm(sum(e.dsigma for e in simplices)) < 1e-12
+    @test all(dot(e.centroid, e.dsigma) > 0 for e in simplices)
+end
+
+@testset "Isotherms through grid nodes and along cell faces" begin
+    # A node at T == Tfo is hot: a cell whose face is at Tfo and that is colder
+    # beyond it holds the face; the cell on the hot side holds nothing.
+    cell = Cell((0.0, 0.0), (1.0, 1.0))
+    on_face = surface_simplices((1.0, 0.5, 1.0, 0.5), cell, 1.0)
+    @test all(v[1] == 0 for e in on_face for v in e.vertices) && sum(e.dsigma for e in on_face) ≈ [1.0, 0.0]
+    @test isempty(surface_simplices((1.5, 1.0, 1.5, 1.0), cell, 1.0))
+    # Affine temperatures whose isotherms run through grid nodes, along faces or
+    # across them: the total dΣ is continuous in Tfo, so no piece is lost or doubled.
+    for D in 2:4, g in (ntuple(k -> k == 1 ? -1.0 : 0.0, D), ntuple(k -> 0.5k - 1.5, D), ntuple(k -> isodd(k) ? -1.0 : 2.0, D))
+        x = collect(0.0:0.5:2.0)
+        T = [dot(g, Tuple(I)) / 2 for I in CartesianIndices(ntuple(_ -> length(x), D))]
+        total(Tfo) = sum((e.dsigma for e in surface_simplices(T, ntuple(_ -> x, D), Tfo)); init=zero(SVector{D,Float64}))
+        for Tfo in unique(T)[2:end-1]
+            @test isapprox(total(Tfo), total(Tfo + 1e-9); atol=1e-6) && isapprox(total(Tfo), total(Tfo - 1e-9); atol=1e-6)
+        end
+    end
+end
+
+@testset "Streaming in 3+1D" begin
+    rng = Xoshiro(3)
+    prev, next = rand(rng, 3, 4, 3), rand(rng, 3, 4, 3)
+    stacked = permutedims(cat(prev, next; dims=4), (4, 1, 2, 3))                 # (2, nx, ny, nz)
+    for I in CartesianIndices(size(prev) .- 1)
+        @test slab_corners(identity, prev, next, I) == cell_corners(stacked, CartesianIndex(1, Tuple(I)...))
+    end
+    # The grid form on a two-slice array is one step of a full extraction.
+    t = [0.0, 0.3, 0.7]; x = [0.0, 1.0, 2.0]; y = [0.0, 0.5, 1.5, 2.0]; z = [-1.0, 0.0, 1.0]
+    T = [1.2 - ti + 0.1 * (xi - yi * zi) for ti in t, xi in x, yi in y, zi in z]
+    full = surface_simplices(T, (t, x, y, z), 0.7)
+    steps = [surface_simplices(T[k:k+1, :, :, :], (t[k:k+1], x, y, z), 0.7) for k in 1:2]
+    @test vcat(steps...) == full
+end
+
+@testset "Merging by hand" begin
+    # Two unit segments in 2D with normals an angle θ apart: flatness cos(θ/2).
+    segment(θ) = SurfaceSimplex((SVector(0.0, 0.0), SVector(0.0, 0.0)), SVector(θ, 0.0), SVector(cos(θ), sin(θ)), (q=θ,))
+    zero2 = zero(element_type(2, (:q,)))
+    @test iszero(zero2)
+    for θ in (0.0, 0.3, 1.0, π)
+        e = merge_element(merge_element(zero2, segment(0.0)), segment(θ))
+        @test e.area ≈ 2 && e.centroid ≈ [θ / 2, 0] && e.fields.q ≈ θ / 2
+        @test isapprox(flatness(e), cos(θ / 2); atol=1e-15)                   # 0 for opposite sheets
+    end
+    # zero area changes nothing; an element merges like its simplices
+    e = merge_element(zero2, segment(0.3))
+    @test merge_element(e, zero2) == e
+    @test merge_element(zero2, e) == e
+    @test merge_element(zero2, zero2) == zero2
+    nothing_there = SurfaceSimplex(segment(0.0).vertices, SVector(5.0, 5.0), SVector(0.0, 0.0), (q=9.0,))
+    @test merge_element(e, nothing_there) == e
+    # integrate_surface with a measure
+    @test integrate_surface([segment(0.0), segment(2.0)], s -> s.dsigma[1]; measure=x -> 1 + x[1]) ≈
+          1 + 3 * cos(2.0)
+end
+
+@testset "Input checks and empty results" begin
+    t = [0.0, 1.0, 2.0]; x = [0.0, 0.5, 1.0]
+    T = [1.0 - ti for ti in t, xi in x]
+    for extract in (surface_simplices, surface_elements)
+        @test_throws DimensionMismatch extract(T, (t, [0.0, 1.0]), 0.5)
+        @test_throws ArgumentError extract(T, (t, [0.0, 1.0, 0.5]), 0.5)
+        @test_throws ArgumentError extract(T, (t, [0.0, 0.5, 0.5]), 0.5)
+        @test_throws ArgumentError extract(T[1:1, :], ([0.0], x), 0.5)
+        @test_throws DimensionMismatch extract(T, (t, x), 0.5; fields=(q=zeros(2, 3),))
+        @test isempty(extract(T, (t, x), 5.0))
+    end
 end
 
 println("All simplicial freeze-out geometry tests passed.")

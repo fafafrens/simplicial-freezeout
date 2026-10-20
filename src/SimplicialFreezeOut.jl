@@ -303,8 +303,10 @@ end
     ReferenceGrid(Val(D))
 
 Build the reference geometry for `D ≥ 2` spacetime dimensions (`D!` simplices
-and `2^(D+1)` cut patterns). It is data independent and cheap for the physical
-cases `D = 2, 3, 4`; `surface_simplices` builds it on every call.
+and `2^(D+1)` cut patterns). It is data independent: build it once and pass it
+as `reference` to the single-cell functions, which otherwise rebuild it on
+every call (about 50 μs in `D = 4`, far more than extracting one cell). The
+grid functions build it once per call.
 """
 function ReferenceGrid(::Val{D}) where {D}
     D >= 2 || throw(ArgumentError("spacetime dimension D must be at least 2"))
@@ -442,10 +444,11 @@ NamedTuple of corner values in the same form.
 
 The base form is a fold over the simplices, like `foldl`: starting from `init`,
 the running value `acc` is replaced by `f(acc, s)` for each simplex `s` in
-the order it is built, and the final value is returned. It allocates nothing,
-so surface integrals can be accumulated on the fly:
+the order it is built, and the final value is returned. With `reference`
+passed it allocates nothing, so surface integrals can be accumulated on the fly:
 
-    flux = surface_simplices((acc, e) -> acc + dot(J, e.dsigma), 0.0, cornerT, cell, Tfo)
+    ref = ReferenceGrid(Val(D))                     # once, outside the loop over cells
+    flux = surface_simplices((acc, e) -> acc + dot(J, e.dsigma), 0.0, cornerT, cell, Tfo; reference=ref)
 
 The other forms are special cases: the callback form calls `f(s)` for
 its effect; the in-place form pushes onto `simplices` (see `simplex_type`)
@@ -545,7 +548,7 @@ ndims_of(n) = round(Int, log2(n))        # 2^(D-1) spatial corners → D-1
     surface_simplices(temperature, coords, Tfo; fields=NamedTuple())
 
 Extract the surface `T = Tfo` from a Cartesian-product spacetime grid.
-`temperature` is a `D`-dimensional array (`D = 2, 3, 4`; first axis is time)
+`temperature` is a `D`-dimensional array (`D ≥ 2`; first axis is time)
 and `coords` a tuple of `D` strictly increasing coordinate vectors, uniform or
 not. `fields` is a NamedTuple of arrays shaped like `temperature`, e.g.
 `(ux=ux, uy=uy)`, whose linearly interpolated values are returned at each
@@ -637,7 +640,7 @@ Absorb `e`, a `SurfaceSimplex` or another `SurfaceElement`, into
 area-weighted means. It is the step function of a fold, so merging the
 simplices of one cell is
 
-    surface_simplices(merge_element, zero(element_type(D, fields)), cornerT, cell, Tfo; fields)
+    surface_simplices(merge_element, zero(element_type(D, fields)), cornerT, cell, Tfo; fields, reference)
 
 and passing the result as `init` for the next cell merges a block of cells.
 Merging is associative: merged elements can be merged again with the same
@@ -694,8 +697,10 @@ const Cells{D} = Union{AbstractArray{<:Cell{D}},Tuple{Vararg{Cell{D}}}}
 
 function surface_element(cornerTs, cells::Cells{D}, Tfo::Real; fields=nothing,
                          reference::ReferenceGrid{D}=ReferenceGrid(Val(D))) where {D}
-    cell_fields = something(fields, Iterators.repeated(NamedTuple()))
-    acc = zero(element_type(D, first(cell_fields)))
+    length(cornerTs) == length(cells) && (isnothing(fields) || length(fields) == length(cells)) ||
+        throw(DimensionMismatch("cornerTs, cells and fields must have one entry per cell"))
+    cell_fields = something(fields, Iterators.repeated(NamedTuple(), length(cells)))
+    acc = zero(element_type(D, isempty(cells) ? NamedTuple() : first(cell_fields)))
     for (cornerT, cell, f) in zip(cornerTs, cells, cell_fields)
         acc = surface_element(acc, cornerT, cell, Tfo; fields=f, reference)
     end

@@ -83,7 +83,8 @@ end
 **Integrals on the fly, without storing the surface.** The base form of
 `surface_simplices` is a fold over the simplices of a cell, like `foldl`: the
 running value is replaced by `f(acc, s)` for each simplex `s` and returned.
-It allocates nothing.
+With `reference` passed it allocates nothing; without it, every call rebuilds
+the reference grid, which costs more than the cell itself.
 
 ```julia
 flux = surface_simplices((acc, e) -> acc + dot(J, e.dsigma), 0.0, cornerT, cell, Tfo; reference=ref)
