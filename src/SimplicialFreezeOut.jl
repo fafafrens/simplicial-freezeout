@@ -4,7 +4,9 @@ using LinearAlgebra
 using StaticArrays
 using Combinatorics: multiset_permutations
 
-export SurfaceElement, ReferenceGrid, Corner, Cell, isosurface, cell_isosurface, cell_isosurface!, element_vector, cell_corners, slab_corners, integrate_surface
+export SurfaceSimplex, SurfaceElement, ReferenceGrid, Corner, Cell,
+       surface_simplices, surface_simplices!, simplex_type, element_type, surface_element, surface_elements,
+       merge_element, flatness, cell_corners, slab_corners, integrate_surface
 
 # ---------------------------------------------------------------------------
 # Types
@@ -104,7 +106,7 @@ end
 position(cell::Cell, s) = cell.origin + cell.width .* s
 
 """
-    SurfaceElement{D,F}
+    SurfaceSimplex{D,F}
 
 A flat `(D-1)`-simplex of the freeze-out surface with its `D` vertices, its
 centroid, the integrated oriented area covector `dsigma` (pointing from
@@ -120,7 +122,7 @@ triangle:
 Each `dsigma` has the segment's length 0.5 and points to larger `t`, where
 it is colder; they sum to `(1, 0)`, the oriented area of the whole line.
 """
-struct SurfaceElement{D,F}
+struct SurfaceSimplex{D,F}
     vertices::NTuple{D,Point{D}}
     centroid::Point{D}
     dsigma::Covector{D}
@@ -295,7 +297,7 @@ end
 
 Build the reference geometry for `D ≥ 2` spacetime dimensions (`D!` simplices
 and `2^(D+1)` cut patterns). It is data independent and cheap for the physical
-cases `D = 2, 3, 4`; `isosurface` builds it on every call.
+cases `D = 2, 3, 4`; `surface_simplices` builds it on every call.
 """
 function ReferenceGrid(::Val{D}) where {D}
     D >= 2 || throw(ArgumentError("spacetime dimension D must be at least 2"))
@@ -304,7 +306,7 @@ function ReferenceGrid(::Val{D}) where {D}
 end
 
 # ---------------------------------------------------------------------------
-# Surface elements
+# Surface simplices
 # ---------------------------------------------------------------------------
 
 """
@@ -326,7 +328,7 @@ end
 # One piece of the isosurface inside one reference simplex of `cell`, or
 # `nothing` if it is degenerate. `cornerT` and each entry of the NamedTuple
 # `fields` hold the cell's corner data, indexable by `Corner`.
-function surface_element(edges::NTuple{D,Edge}, simplex::RefSimplex{D}, cornerT, Tfo,
+function surface_simplex(edges::NTuple{D,Edge}, simplex::RefSimplex{D}, cornerT, Tfo,
                          cell::Cell{D}, fields) where {D}
     T = vertex_values(cornerT, simplex)             # in local vertex order 1…D+1
     X = map(coordinates, simplex)                   # vertex positions in the unit cell
@@ -353,65 +355,77 @@ function surface_element(edges::NTuple{D,Edge}, simplex::RefSimplex{D}, cornerT,
     basis = unit_vectors(Val(D + 1))
     weights = sum(map((e, t) -> lerp(basis, e, t), edges, θ)) / D
     sampled = map(A -> dot(weights, vertex_values(A, simplex)), fields)
-    SurfaceElement(vertices, centroid, dsigma, sampled)
+    SurfaceSimplex(vertices, centroid, dsigma, sampled)
 end
 
-"""
-    element_vector(Val(D), fields)
-
-An empty, concretely typed vector of the `SurfaceElement`s that
-`cell_isosurface` produces in `D` dimensions for these `fields`, e.g.
-`SurfaceElement{3, @NamedTuple{ux::Float64}}[]` for `fields = (ux=…,)`.
-"""
-element_vector(::Val{D}, fields) where {D} = SurfaceElement{D,typeof(map(_ -> 0.0, fields))}[]
+# The type of the interpolated `fields` of a simplex or element: one Float64
+# per field name. Takes the names, or the NamedTuple of fields itself.
+field_names(names::Tuple{Vararg{Symbol}}) = names
+field_names(fields::NamedTuple) = keys(fields)
+field_type(names) = NamedTuple{field_names(names),NTuple{length(field_names(names)),Float64}}
 
 """
-    cell_isosurface(f, init, cornerT, cell::Cell, Tfo; fields=NamedTuple(), reference=ReferenceGrid(Val(D)))
-    cell_isosurface(f, cornerT, cell::Cell, Tfo; ...)
-    cell_isosurface!(elements, cornerT, cell::Cell, Tfo; ...)
-    cell_isosurface(cornerT, cell::Cell, Tfo; ...)
-    cell_isosurface(cornerT, origin, width, Tfo; ...)
+    simplex_type(D, names=())
 
-Isosurface `T = Tfo` inside one hypercube cell. `cornerT` holds the `2^D`
+The concrete `SurfaceSimplex` type that `surface_simplices` produces in `D`
+dimensions with fields called `names`, a tuple of symbols or the NamedTuple of
+fields itself: `simplex_type(3, (:ux, :uy))` is
+`SurfaceSimplex{3, @NamedTuple{ux::Float64, uy::Float64}}`. An empty vector to
+collect simplices with `surface_simplices!` is
+
+    out = simplex_type(3, (:ux, :uy))[]
+"""
+simplex_type(D::Integer, names=()) = SurfaceSimplex{D,field_type(names)}
+
+"""
+    surface_simplices(f, init, cornerT, cell::Cell, Tfo; fields=NamedTuple(), reference=ReferenceGrid(Val(D)))
+    surface_simplices(f, cornerT, cell::Cell, Tfo; ...)
+    surface_simplices!(simplices, cornerT, cell::Cell, Tfo; ...)
+    surface_simplices(cornerT, cell::Cell, Tfo; ...)
+    surface_simplices(cornerT, origin, width, Tfo; ...)
+
+The surface `T = Tfo` inside one hypercube cell, as flat `SurfaceSimplex`
+pieces, one or more per reference simplex it crosses. `cornerT` holds the `2^D`
 corner temperatures, indexable by `Corner`: a `2×…×2` array or a tuple in
 linear-index order (see `cell_corners`, `slab_corners`). `fields` is a
 NamedTuple of corner values in the same form.
 
-The base form is a fold over the pieces, like `foldl`: starting from `init`,
-the running value `acc` is replaced by `f(acc, element)` for each piece in
+The base form is a fold over the simplices, like `foldl`: starting from `init`,
+the running value `acc` is replaced by `f(acc, s)` for each simplex `s` in
 the order it is built, and the final value is returned. It allocates nothing,
 so surface integrals can be accumulated on the fly:
 
-    flux = cell_isosurface((acc, e) -> acc + dot(J, e.dsigma), 0.0, cornerT, cell, Tfo)
+    flux = surface_simplices((acc, e) -> acc + dot(J, e.dsigma), 0.0, cornerT, cell, Tfo)
 
-The other forms are special cases: the callback form calls `f(element)` for
-its effect; the in-place form pushes onto `elements` (see `element_vector`)
+The other forms are special cases: the callback form calls `f(s)` for
+its effect; the in-place form pushes onto `simplices` (see `simplex_type`)
 and returns it; the remaining forms return a fresh vector of
-`SurfaceElement`s, empty if the surface does not cross the cell.
+`SurfaceSimplex`es, empty if the surface does not cross the cell. To merge
+them into one element per cell, see `surface_element`.
 """
-function cell_isosurface(f, init, cornerT, cell::Cell{D}, Tfo::Real;
-                         fields::NamedTuple=NamedTuple(),
-                         reference::ReferenceGrid{D}=ReferenceGrid(Val(D))) where {D}
+function surface_simplices(f, init, cornerT, cell::Cell{D}, Tfo::Real;
+                           fields::NamedTuple=NamedTuple(),
+                           reference::ReferenceGrid{D}=ReferenceGrid(Val(D))) where {D}
     acc = init
     Tmin, Tmax = extrema(c -> cornerT[c], corners(Val(D)))
     Tmin <= Tfo <= Tmax || return acc                                  # cheap rejection
     for simplex in reference.simplices
         is_hot = map(c -> cornerT[c] >= Tfo, simplex)
         for edges in reference.cases[case_index(is_hot)]
-            element = surface_element(edges, simplex, cornerT, Tfo, cell, fields)
-            isnothing(element) || (acc = f(acc, element))
+            piece = surface_simplex(edges, simplex, cornerT, Tfo, cell, fields)
+            isnothing(piece) || (acc = f(acc, piece))
         end
     end
     acc
 end
-cell_isosurface(f, cornerT, cell::Cell, Tfo::Real; kwargs...) =
-    cell_isosurface((_, e) -> (f(e); nothing), nothing, cornerT, cell, Tfo; kwargs...)
-cell_isosurface!(elements::AbstractVector, cornerT, cell::Cell, Tfo::Real; kwargs...) =
-    cell_isosurface(push!, elements, cornerT, cell, Tfo; kwargs...)
-cell_isosurface(cornerT, cell::Cell{D}, Tfo::Real; fields::NamedTuple=NamedTuple(), kwargs...) where {D} =
-    cell_isosurface!(element_vector(Val(D), fields), cornerT, cell, Tfo; fields, kwargs...)
-cell_isosurface(cornerT, origin, width, Tfo::Real; kwargs...) =
-    cell_isosurface(cornerT, Cell(origin, width), Tfo; kwargs...)
+surface_simplices(f, cornerT, cell::Cell, Tfo::Real; kwargs...) =
+    surface_simplices((_, e) -> (f(e); nothing), nothing, cornerT, cell, Tfo; kwargs...)
+surface_simplices!(simplices::AbstractVector, cornerT, cell::Cell, Tfo::Real; kwargs...) =
+    surface_simplices(push!, simplices, cornerT, cell, Tfo; kwargs...)
+surface_simplices(cornerT, cell::Cell{D}, Tfo::Real; fields::NamedTuple=NamedTuple(), kwargs...) where {D} =
+    surface_simplices!(simplex_type(D, fields)[], cornerT, cell, Tfo; fields, kwargs...)
+surface_simplices(cornerT, origin, width, Tfo::Real; kwargs...) =
+    surface_simplices(cornerT, Cell(origin, width), Tfo; kwargs...)
 
 # ---------------------------------------------------------------------------
 # Grid driver
@@ -435,7 +449,7 @@ end
     cell_corners([f,] A, I::CartesianIndex)
 
 The `2^D` values of the grid array `A` at the corners of the cell whose lowest
-corner is `I`, as a tuple in linear-index order, ready for `cell_isosurface`:
+corner is `I`, as a tuple in linear-index order, ready for `surface_simplices`:
 with `A = [10 30; 20 40]`, `cell_corners(A, CartesianIndex(1, 1))` is
 `(10.0, 20.0, 30.0, 40.0)`, the same as `Tuple(A[1:2, 1:2])`. With `f`, each
 grid value is mapped through `f` first, e.g. an equation of state applied to
@@ -462,8 +476,8 @@ equation of state, or `u -> u.ux` for a field). With a hydro state kept as
 two slices `u_prev` and `u`, one time step of extraction is
 
     for I in CartesianIndices(size(u) .- 1)
-        cell_isosurface!(out, slab_corners(temperature, u_prev, u, I), Cell((t_prev, t), (x, y), I), Tfo;
-                         fields=(ux=slab_corners(u -> u.ux, u_prev, u, I),), reference)
+        surface_simplices!(out, slab_corners(temperature, u_prev, u, I), Cell((t_prev, t), (x, y), I), Tfo;
+                           fields=(ux=slab_corners(u -> u.ux, u_prev, u, I),), reference)
     end
 """
 slab_corners(prev::NTuple{n}, next::NTuple{n}) where {n} =
@@ -475,32 +489,177 @@ slab_corners(f, prev::AbstractArray{<:Any,d}, next::AbstractArray{<:Any,d}, I::C
 ndims_of(n) = round(Int, log2(n))        # 2^(D-1) spatial corners → D-1
 
 """
-    isosurface(temperature, coords, Tfo; fields=NamedTuple())
+    surface_simplices(temperature, coords, Tfo; fields=NamedTuple())
 
 Extract the surface `T = Tfo` from a Cartesian-product spacetime grid.
 `temperature` is a `D`-dimensional array (`D = 2, 3, 4`; first axis is time)
 and `coords` a tuple of `D` strictly increasing coordinate vectors, uniform or
 not. `fields` is a NamedTuple of arrays shaped like `temperature`, e.g.
 `(ux=ux, uy=uy)`, whose linearly interpolated values are returned at each
-element centroid.
+simplex centroid.
 
-Returns a vector of `SurfaceElement`s: segments for `D=2`, triangles for
+Returns a vector of `SurfaceSimplex`es: segments for `D=2`, triangles for
 `D=3`, tetrahedra for `D=4`, each oriented from hot to cold. The extraction
 can be streamed by passing two consecutive time slices as a `(2, nx, …)` array.
 
 Vertices with `T == Tfo` count as hot; the resulting zero-area pieces are
-dropped. Extended plateaus with `T == Tfo` are not supported.
+dropped. Extended plateaus with `T == Tfo` are not supported. For one merged
+element per cell or per block of cells, see `surface_elements`.
 """
-function isosurface(temperature::AbstractArray{<:Real,D},
-                    coords::Tuple{Vararg{AbstractVector,D}}, Tfo::Real;
-                    fields::NamedTuple=NamedTuple()) where {D}
+function surface_simplices(temperature::AbstractArray{<:Real,D},
+                           coords::Tuple{Vararg{AbstractVector,D}}, Tfo::Real;
+                           fields::NamedTuple=NamedTuple()) where {D}
     check_inputs(temperature, coords, fields)
     reference = ReferenceGrid(Val(D))
-    elements = element_vector(Val(D), fields)
+    simplices = simplex_type(D, fields)[]
 
     for I in CartesianIndices(size(temperature) .- 1)
-        cell_isosurface!(elements, cell_corners(temperature, I), Cell(coords, I), Tfo;
-                         fields=map(A -> cell_corners(A, I), fields), reference)
+        surface_simplices!(simplices, cell_corners(temperature, I), Cell(coords, I), Tfo;
+                           fields=map(A -> cell_corners(A, I), fields), reference)
+    end
+    simplices
+end
+
+# ---------------------------------------------------------------------------
+# Surface elements: the simplices of a cell, or of a block of cells, merged
+# ---------------------------------------------------------------------------
+
+"""
+    SurfaceElement{D,F}
+
+Several `SurfaceSimplex`es merged into one surface element, like the one
+element per cell that Cornelius returns. `dsigma` is the sum of their area
+covectors, `area` the sum of their areas `|dσ|` (Euclidean norm of the
+components), and `centroid` and `fields` are area-weighted means. In the unit
+square with `T = 1.5 - t` and `Tfo = 1`, the two segments shown for
+`SurfaceSimplex` merge into
+
+    centroid     dsigma      area   fields
+    (0.5, 0.5)   (1.0, 0.0)  1.0    area-weighted means
+
+`dsigma` is summed rather than averaged because it is additive: the flux of a
+constant current through the merged simplices is exactly `J ⋅ dsigma`. Fields are
+averaged component by component, so rebuild nonlinear quantities from the
+means: recompute `u⁰` from averaged spatial components, since a mean of unit
+four-velocities is not a unit four-velocity. Merging simplices that lie on one
+flat sheet is exact for affine integrands; see `flatness` for how far from flat
+a merged element is.
+"""
+struct SurfaceElement{D,F}
+    centroid::Point{D}
+    dsigma::Covector{D}
+    area::Float64
+    fields::F
+end
+
+"""
+    element_type(D, names=())
+
+The concrete `SurfaceElement` type in `D` dimensions with fields called
+`names`, like `simplex_type`: an empty vector of elements is
+`element_type(3, (:ux, :uy))[]`.
+"""
+element_type(D::Integer, names=()) = SurfaceElement{D,field_type(names)}
+
+"""
+    zero(element_type(D, names))
+    iszero(e::SurfaceElement)
+
+The `SurfaceElement` with zero area: the neutral element of `merge_element`
+and the starting value for merging. `iszero` tells whether an element is
+empty, e.g. a `surface_element` of a cell the surface does not cross.
+"""
+Base.zero(::Type{SurfaceElement{D,F}}) where {D,F} =
+    SurfaceElement(zero(Point{D}), zero(Covector{D}), 0.0, F(ntuple(_ -> 0.0, fieldcount(F))))
+Base.iszero(e::SurfaceElement) = iszero(e.area)
+
+area(e::SurfaceSimplex) = norm(e.dsigma)
+area(e::SurfaceElement) = e.area
+
+"""
+    merge_element(acc::SurfaceElement, e)
+
+Absorb `e`, a `SurfaceSimplex` or another `SurfaceElement`, into
+`acc`: the area covectors and areas add, the centroid and fields become the
+area-weighted means. It is the step function of a fold, so merging the
+simplices of one cell is
+
+    surface_simplices(merge_element, zero(element_type(D, fields)), cornerT, cell, Tfo; fields)
+
+and passing the result as `init` for the next cell merges a block of cells.
+Merging is associative: merged elements can be merged again with the same
+result as merging all their simplices at once.
+"""
+function merge_element(acc::SurfaceElement, e)
+    w = area(e)
+    iszero(w) && return acc
+    total = acc.area + w
+    a, b = acc.area / total, w / total
+    SurfaceElement(a * acc.centroid + b * e.centroid, acc.dsigma + e.dsigma, total,
+                   map((p, q) -> a * p + b * q, acc.fields, e.fields))
+end
+
+"""
+    flatness(e::SurfaceElement)
+
+`|dsigma| / area`, between 0 and 1. It is 1 when every merged simplex has the
+same normal, and about `1 - θ²/8` for two equal simplices bent by an angle `θ`.
+Simplices of two opposite sheets partly cancel in `dsigma`, so a low value also
+flags a merge across separate parts of the surface.
+"""
+flatness(e::SurfaceElement) = norm(e.dsigma) / e.area
+
+"""
+    surface_element(cornerT, cell::Cell, Tfo; fields=NamedTuple(), reference=ReferenceGrid(Val(D)))
+
+The surface `T = Tfo` inside one cell as a single `SurfaceElement`: all the
+cell's `SurfaceSimplex`es merged. It takes the same arguments as
+`surface_simplices`; if the surface does not cross the cell the result `iszero`.
+"""
+surface_element(cornerT, cell::Cell{D}, Tfo::Real; fields::NamedTuple=NamedTuple(), kwargs...) where {D} =
+    surface_simplices(merge_element, zero(element_type(D, fields)), cornerT, cell, Tfo; fields, kwargs...)
+
+"""
+    surface_elements(temperature, coords, Tfo; fields=NamedTuple(), block=1, min_flatness=0.0)
+
+Like `surface_simplices` on a grid, but returns one `SurfaceElement` per block
+of cells crossed by the surface. `block` is the block size in cells, an integer or one per axis:
+`block=1` gives one element per cell, `block=(4, 1, 1)` merges 4 cells in time
+only, `block=4` merges `4^D` cells. The geometry is still extracted on the full
+grid, so the merge loses no small features; the quadrature error grows like
+the square of the block width.
+
+A block whose merged `flatness` falls below `min_flatness` is returned as one
+element per cell instead, keeping full resolution where the surface bends or
+where separate sheets share a block.
+"""
+function surface_elements(temperature::AbstractArray{<:Real,D},
+                           coords::Tuple{Vararg{AbstractVector,D}}, Tfo::Real;
+                           fields::NamedTuple=NamedTuple(), block=1, min_flatness::Real=0.0) where {D}
+    check_inputs(temperature, coords, fields)
+    reference = ReferenceGrid(Val(D))
+    width = block isa Integer ? ntuple(_ -> block, Val(D)) : NTuple{D,Int}(block)
+    cells = size(temperature) .- 1
+    elements = element_type(D, fields)[]
+
+    merge_cell(acc, I) = surface_simplices(merge_element, acc, cell_corners(temperature, I), Cell(coords, I), Tfo;
+                                         fields=map(A -> cell_corners(A, I), fields), reference)
+    for B in CartesianIndices(cld.(cells, width))
+        first_cell = (Tuple(B) .- 1) .* width .+ 1
+        block_cells = CartesianIndices(map(:, first_cell, min.(first_cell .+ width .- 1, cells)))
+        merged = zero(element_type(D, fields))
+        for I in block_cells
+            merged = merge_cell(merged, I)
+        end
+        iszero(merged) && continue
+        if flatness(merged) >= min_flatness || length(block_cells) == 1
+            push!(elements, merged)
+        else
+            for I in block_cells
+                e = merge_cell(zero(element_type(D, fields)), I)
+                iszero(e) || push!(elements, e)
+            end
+        end
     end
     elements
 end

@@ -1,6 +1,21 @@
+name = "SimplicialFreezeOut"
+uuid = "04deed4b-d86e-499d-b2e9-20712b287c38"
+version = "0.1.0"
+authors = ["Eduardo Grossi <eduardo.grossi@unifi.it>"]
+
 [deps]
-CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[compat]
+Combinatorics = "1"
+LinearAlgebra = "1"
+StaticArrays = "1"
+julia = "1.10"
+
+[extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

@@ -2,10 +2,7 @@
 # Run from the repository root:
 #   julia --project=examples -e 'using Pkg; Pkg.instantiate()'   # once
 #   julia --project=examples examples/example.jl
-# Load the module once per session: including it again would define a second
-# module with the same exports and make every exported name ambiguous on re-run.
-isdefined(Main, :SimplicialFreezeOut) || include(joinpath(@__DIR__, "..", "SimplicialFreezeOut.jl"))
-using .SimplicialFreezeOut, StaticArrays, LinearAlgebra
+using SimplicialFreezeOut, StaticArrays, LinearAlgebra
 using CairoMakie
 
 # A cooling 2+1D fireball: energy-density-like temperature and a radial flow.
@@ -20,17 +17,17 @@ function stored_grid()
     T  = [temperature_field(ti, xi, yi) for ti in t, xi in x, yi in y]
     ux = [0.1xi for ti in t, xi in x, yi in y]
     uy = [0.1yi for ti in t, xi in x, yi in y]
-    elements = isosurface(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
+    simplices = surface_simplices(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
 
-    e = first(elements)
-    println("1. stored grid: ", length(elements), " oriented triangles")
-    println("   first element: vertices ", e.vertices)
+    e = first(simplices)
+    println("1. stored grid: ", length(simplices), " oriented triangles")
+    println("   first simplex: vertices ", e.vertices)
     println("                  dΣ ", e.dsigma, ", ux ", e.fields.ux, ", uy ", e.fields.uy)
 
     # Centroid quadrature of a surface integral: flux of the current J = (1, 0, 0).
-    flux = integrate_surface(elements, e -> e.dsigma[1])
+    flux = integrate_surface(simplices, e -> e.dsigma[1])
     println("   ∫ dΣ₀ over the surface = ", flux)
-    elements
+    simplices
 end
 
 # --- 2. One cell, by hand -----------------------------------------------------
@@ -38,7 +35,7 @@ function one_cell()
     # The unit 4D hypercube with T = t: the isotherm T = 0.37 is the plane t = 0.37.
     cornerT = Tuple(Float64(ti) for ti in 0:1, xi in 0:1, yi in 0:1, zi in 0:1)   # 2×2×2×2, time first
     cell = Cell((0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0))
-    tets = cell_isosurface(cornerT, cell, 0.37)
+    tets = surface_simplices(cornerT, cell, 0.37)
     println("2. one 4D cell: ", length(tets), " tetrahedra, total dΣ = ",
             sum(e.dsigma for e in tets), "  (expected (-1, 0, 0, 0): hot is t ≥ 0.37)")
 end
@@ -49,12 +46,12 @@ state(ti) = [(T=temperature_field(ti, xi, yi), ux=0.1xi, uy=0.1yi) for xi in x, 
 
 function streamed()
     ref = ReferenceGrid(Val(3))                          # build once, reuse
-    out = element_vector(Val(3), (ux=nothing, uy=nothing))
+    out = simplex_type(3, (:ux, :uy))[]
     u_prev = state(t[1])
     for k in 2:length(t)
         u = state(t[k])
         for I in CartesianIndices(size(u) .- 1)
-            cell_isosurface!(out, slab_corners(s -> s.T, u_prev, u, I),
+            surface_simplices!(out, slab_corners(s -> s.T, u_prev, u, I),
                              Cell((t[k-1], t[k]), (x, y), I), Tfo;
                              fields=(ux=slab_corners(s -> s.ux, u_prev, u, I),
                                      uy=slab_corners(s -> s.uy, u_prev, u, I)),
@@ -67,7 +64,7 @@ function streamed()
 end
 
 # --- 4. An integral accumulated on the fly, never storing the surface --------
-# The fold form: cell_isosurface(f, init, cornerT, cell, Tfo) returns
+# The fold form: surface_simplices(f, init, cornerT, cell, Tfo) returns
 # f(…f(f(init, e₁), e₂)…, eₙ) over the pieces of the cell.
 function on_the_fly()
     ref = ReferenceGrid(Val(3))
@@ -83,10 +80,10 @@ function on_the_fly()
             fields = (ux=slab_corners(s -> s.ux, u_prev, u, I), uy=slab_corners(s -> s.uy, u_prev, u, I))
 
             # scalar accumulator
-            flux = cell_isosurface((acc, e) -> acc + e.dsigma[1], flux, cornerT, cell, Tfo; reference=ref)
+            flux = surface_simplices((acc, e) -> acc + e.dsigma[1], flux, cornerT, cell, Tfo; reference=ref)
 
             # array accumulator, with a do block
-            cell_isosurface(spectrum, cornerT, cell, Tfo; fields, reference=ref) do S, e
+            surface_simplices(spectrum, cornerT, cell, Tfo; fields, reference=ref) do S, e
                 u0 = sqrt(1 + e.fields.ux^2 + e.fields.uy^2)
                 for (j, p) in enumerate(momenta)
                     S[j] += p * e.dsigma[1] * exp(-p * u0 / Tfo)
@@ -101,14 +98,14 @@ function on_the_fly()
     flux
 end
 
-grid_elements = stored_grid()
+grid_simplices = stored_grid()
 one_cell()
 out = streamed()
 flux = on_the_fly()
 
 # The three ways of extracting the 2+1D surface agree.
-@assert length(out) == length(grid_elements)
-@assert flux ≈ sum(e.dsigma[1] for e in grid_elements)
+@assert length(out) == length(grid_simplices)
+@assert flux ≈ sum(e.dsigma[1] for e in grid_simplices)
 println("checks passed: streamed and on-the-fly results match the stored-grid surface")
 
 # --- 5. A figure of the freeze-out surface ------------------------------------
@@ -120,12 +117,12 @@ function plot_surface(path)
     T  = [temperature_field(ti, xi, yi) for ti in tf, xi in xf, yi in yf]
     ux = [0.1xi for ti in tf, xi in xf, yi in yf]
     uy = [0.1yi for ti in tf, xi in xf, yi in yf]
-    elements = isosurface(T, (tf, xf, yf), Tfo; fields=(ux=ux, uy=uy))
+    simplices = surface_simplices(T, (tf, xf, yf), Tfo; fields=(ux=ux, uy=uy))
 
     # One mesh vertex per triangle corner, so each triangle can carry its own colour.
-    points = [Point3f(v[2], v[3], v[1]) for e in elements for v in e.vertices]   # (x, y, t)
-    faces  = [CairoMakie.GeometryBasics.TriangleFace(3k - 2, 3k - 1, 3k) for k in eachindex(elements)]
-    speed  = [hypot(e.fields.ux, e.fields.uy) for e in elements for _ in 1:3]
+    points = [Point3f(v[2], v[3], v[1]) for e in simplices for v in e.vertices]   # (x, y, t)
+    faces  = [CairoMakie.GeometryBasics.TriangleFace(3k - 2, 3k - 1, 3k) for k in eachindex(simplices)]
+    speed  = [hypot(e.fields.ux, e.fields.uy) for e in simplices for _ in 1:3]
 
     # Sequential single-hue ramp, light (slow) to dark (fast).
     blues = cgrad(["#b7d3f6", "#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281", "#0d366b"])
@@ -140,8 +137,8 @@ function plot_surface(path)
     m = mesh!(ax3, points, faces; color=speed, colormap=blues, shading=true)
     Colorbar(fig[1, 2], m; label="flow speed |u|", labelcolor=muted, height=Relative(0.6))
 
-    r  = [hypot(e.centroid[2], e.centroid[3]) for e in elements]
-    tc = [e.centroid[1] for e in elements]
+    r  = [hypot(e.centroid[2], e.centroid[3]) for e in simplices]
+    tc = [e.centroid[1] for e in simplices]
     rr = range(0, maximum(r); length=200)
     ax2 = Axis(fig[1, 3]; xlabel="r", ylabel="t", title="Freeze-out time against radius",
                titlecolor=ink, titlealign=:left, xlabelcolor=muted, ylabelcolor=muted,
@@ -152,7 +149,7 @@ function plot_surface(path)
 
     colsize!(fig.layout, 1, Relative(0.55))
     save(path, fig; px_per_unit=2)
-    println("5. figure: ", length(elements), " triangles drawn, saved to ", path)
+    println("5. figure: ", length(simplices), " triangles drawn, saved to ", path)
 end
 
 plot_surface(joinpath(@__DIR__, "freezeout_surface.png"))
