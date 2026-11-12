@@ -20,7 +20,7 @@ grid_fields() = ([temperature_field(ti, xi, yi) for ti in t, xi in x, yi in y],
 # --- 1. A stored spacetime grid ----------------------------------------------
 function stored_grid()
     T, ux, uy = grid_fields()
-    simplices = surface_simplices(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
+    simplices = grid_simplices(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
 
     e = first(simplices)
     println("1. stored grid: ", length(simplices), " oriented triangles")
@@ -37,8 +37,8 @@ end
 function one_cell()
     # The unit 4D hypercube with T = t: the isotherm T = 0.37 is the plane t = 0.37.
     cornerT = Tuple(Float64(ti) for ti in 0:1, xi in 0:1, yi in 0:1, zi in 0:1)   # 2×2×2×2, time first
-    cell = Cell((0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0))
-    tets = surface_simplices(cornerT, cell, 0.37)
+    cell = Cell((0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0), cornerT)             # origin, width, corner temperatures
+    tets = surface_simplices(cell, 0.37)
     println("2. one 4D cell: ", length(tets), " tetrahedra, total dΣ = ",
             sum(e.dsigma for e in tets), "  (expected (-1, 0, 0, 0): hot is t ≥ 0.37)")
 end
@@ -54,11 +54,9 @@ function streamed()
     for k in 2:length(t)
         u = state(t[k])
         for I in CartesianIndices(size(u) .- 1)
-            surface_simplices!(out, slab_corners(s -> s.T, u_prev, u, I),
-                             Cell((t[k-1], t[k]), (x, y), I), Tfo;
-                             fields=(ux=slab_corners(s -> s.ux, u_prev, u, I),
-                                     uy=slab_corners(s -> s.uy, u_prev, u, I)),
-                             reference=ref)
+            # The cell between the two slices: the temperature and the fields are functions of the state.
+            cell = Cell(s -> s.T, (u_prev, u), (t[k-1], t[k]), (x, y), I; fields=(ux = s -> s.ux, uy = s -> s.uy))
+            surface_simplices!(out, cell, Tfo; reference=ref)
         end
         u_prev = u
     end
@@ -67,7 +65,7 @@ function streamed()
 end
 
 # --- 4. An integral accumulated on the fly, never storing the surface --------
-# The fold form: surface_simplices(f, init, cornerT, cell, Tfo) returns
+# The fold form: surface_simplices(f, init, cell, Tfo) returns
 # f(…f(f(init, e₁), e₂)…, eₙ) over the pieces of the cell.
 function on_the_fly()
     ref = ReferenceGrid(Val(3))
@@ -78,15 +76,13 @@ function on_the_fly()
     for k in 2:length(t)
         u = state(t[k])
         for I in CartesianIndices(size(u) .- 1)
-            cornerT = slab_corners(s -> s.T, u_prev, u, I)
-            cell = Cell((t[k-1], t[k]), (x, y), I)
-            fields = (ux=slab_corners(s -> s.ux, u_prev, u, I), uy=slab_corners(s -> s.uy, u_prev, u, I))
+            cell = Cell(s -> s.T, (u_prev, u), (t[k-1], t[k]), (x, y), I; fields=(ux = s -> s.ux, uy = s -> s.uy))
 
             # scalar accumulator
-            flux = surface_simplices((acc, e) -> acc + e.dsigma[1], flux, cornerT, cell, Tfo; reference=ref)
+            flux = surface_simplices((acc, e) -> acc + e.dsigma[1], flux, cell, Tfo; reference=ref)
 
             # array accumulator, with a do block
-            surface_simplices(spectrum, cornerT, cell, Tfo; fields, reference=ref) do S, e
+            surface_simplices(spectrum, cell, Tfo; reference=ref) do S, e
                 u0 = sqrt(1 + e.fields.ux^2 + e.fields.uy^2)
                 for (j, p) in enumerate(momenta)
                     S[j] += p * e.dsigma[1] * exp(-p * u0 / Tfo)
@@ -116,30 +112,36 @@ function merged()
     # Only the cells the surface crosses contribute.
     ref = ReferenceGrid(Val(3))
     block = CartesianIndices((1:length(t)-1, 12:13, 12:13))
-    cornerTs = [cell_corners(T, I) for I in block]
-    cells = [Cell((t, x, y), I) for I in block]
-    fields = [(ux=cell_corners(ux, I), uy=cell_corners(uy, I)) for I in block]
-    e = surface_element(cornerTs, cells, Tfo; fields, reference=ref)
+    cells = [Cell(T, (t, x, y), I; fields=(ux=ux, uy=uy)) for I in block]
+    e = foldl((acc, cell) -> surface_element(acc, cell, Tfo; reference=ref), cells; init=zero(element_type(3, (:ux, :uy))))
     println("   2×2 block: centroid ", e.centroid, ", dΣ ", e.dsigma, ", flatness ", flatness(e))
     println("              ux ", e.fields.ux, ", uy ", e.fields.uy, " (exactly 0.1 x and 0.1 y at the centroid)")
 
     # The same element from the block's per-cell elements, merged with merge_element.
-    per_cell = [surface_element(cornerTs[k], cells[k], Tfo; fields=fields[k], reference=ref) for k in eachindex(cells)]
+    per_cell = [surface_element(cell, Tfo; reference=ref) for cell in cells]
     again = foldl(merge_element, per_cell; init=zero(element_type(3, (:ux, :uy))))
     @assert again.dsigma ≈ e.dsigma && again.centroid ≈ e.centroid
+
+    # Many fields: elements without fields, and the field values written into an array.
+    bare = element_type(3)[]
+    values = Float64[]
+    surface_elements!(bare, values, T, (t, x, y), Tfo, [ux, uy])
+    F = reshape(values, 2, :)                                  # F[k, j] is field k on element j
+    @assert all(F[1, j] ≈ elements[j].fields.ux && F[2, j] ≈ elements[j].fields.uy for j in eachindex(elements))
+    println("   in place: a ", size(F, 1), "×", size(F, 2), " array of field values, equal to the fields above")
     elements
 end
 
-grid_simplices = stored_grid()
+stored = stored_grid()
 one_cell()
 out = streamed()
 flux = on_the_fly()
 elements = merged()
 
 # The ways of extracting the 2+1D surface agree; merging keeps the total dΣ.
-@assert length(out) == length(grid_simplices)
-@assert flux ≈ sum(e.dsigma[1] for e in grid_simplices)
-@assert sum(e.dsigma for e in elements) ≈ sum(e.dsigma for e in grid_simplices)
+@assert length(out) == length(stored)
+@assert flux ≈ sum(e.dsigma[1] for e in stored)
+@assert sum(e.dsigma for e in elements) ≈ sum(e.dsigma for e in stored)
 println("checks passed: streamed, on-the-fly and merged results match the stored-grid surface")
 
 # --- 6. A figure of the freeze-out surface ------------------------------------
@@ -151,7 +153,7 @@ function plot_surface(path)
     T  = [temperature_field(ti, xi, yi) for ti in tf, xi in xf, yi in yf]
     ux = [0.1xi for ti in tf, xi in xf, yi in yf]
     uy = [0.1yi for ti in tf, xi in xf, yi in yf]
-    simplices = surface_simplices(T, (tf, xf, yf), Tfo; fields=(ux=ux, uy=uy))
+    simplices = grid_simplices(T, (tf, xf, yf), Tfo; fields=(ux=ux, uy=uy))
 
     # One mesh vertex per triangle corner, so each triangle can carry its own colour.
     points = [Point3f(v[2], v[3], v[1]) for e in simplices for v in e.vertices]   # (x, y, t)

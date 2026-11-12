@@ -17,7 +17,7 @@ using Test, StaticArrays, LinearAlgebra, Random
         temperature = [axes[1][I[1]] for I in CartesianIndices(sizes)]
         affine_field = [2.0 + sum(k*axes[k][I[k]] for k in 1:D)
                         for I in CartesianIndices(sizes)]
-        simplices = surface_simplices(temperature, axes, 0.37; fields=(q=affine_field,))
+        simplices = grid_simplices(temperature, axes, 0.37; fields=(q=affine_field,))
         @test !isempty(simplices)
         @test all(abs(e.centroid[1] - 0.37) < 1e-12 for e in simplices)
         for e in simplices
@@ -34,7 +34,7 @@ using Test, StaticArrays, LinearAlgebra, Random
         temp2 = [sum(g[k]*axes[k][I[k]] for k in 1:D)
                  for I in CartesianIndices(sizes)]
         level = (minimum(temp2)+maximum(temp2))/2
-        simplices2 = surface_simplices(temp2, axes, level)
+        simplices2 = grid_simplices(temp2, axes, level)
         @test !isempty(simplices2)
         for e in simplices2
             @test all(abs(sum(g[mu]*v[mu] for mu in 1:D)-level) < 1e-10
@@ -48,7 +48,7 @@ end
     # T = 1 - r^2 on a grid that contains nodes with r^2 = 1/2 exactly.
     x = collect(range(-1.0, 1.0; length=25))
     T = [1.0 - (xi^2 + yi^2 + zi^2) for xi in x, yi in x, zi in x]
-    simplices = surface_simplices(T, (x, x, x), 0.5)
+    simplices = grid_simplices(T, (x, x, x), 0.5)
     @test all(allunique(e.vertices) for e in simplices)
     @test all(sum(e.centroid .* e.dsigma) > 0 for e in simplices)   # outward
     # Closed surface: every edge is shared by exactly two triangles.
@@ -67,17 +67,17 @@ end
     # One unit cube, T = 1.5 - t, isotherm t = 0.5 (hot at t < 0.5).
     T = [1.5 - t for t in 0:1, x in 0:1, y in 0:1]          # 2×2×2 array
     q = [3.0 + t + 2x + 3y for t in 0:1, x in 0:1, y in 0:1]
-    simplices = surface_simplices(T, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 1.0; fields=(q=q,))
+    simplices = surface_simplices(Cell((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), T; fields=(q=q,)), 1.0)
     @test length(simplices) == 8
     @test all(abs(e.centroid[1] - 0.5) < 1e-12 for e in simplices)
     @test sum(e.dsigma[1] for e in simplices) ≈ 1.0
     @test all(e.fields.q ≈ 3.0 + sum((1,2,3) .* e.centroid) for e in simplices)
     # Corner tuples give the same result as the 2×2×2 array.
-    @test surface_simplices(Tuple(T), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 1.0) ==
-          surface_simplices(T, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 1.0)
+    @test surface_simplices(Cell((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), Tuple(T)), 1.0) ==
+          surface_simplices(Cell((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), T), 1.0)
     # The grid driver on the same cube agrees.
-    @test surface_simplices(T, ([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]), 1.0; fields=(q=q,)) == simplices
-    @test isempty(surface_simplices(T, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 2.0))
+    @test grid_simplices(T, ([0.0, 1.0], [0.0, 1.0], [0.0, 1.0]), 1.0; fields=(q=q,)) == simplices
+    @test isempty(surface_simplices(Cell((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), T), 2.0))
 end
 
 @testset "Streaming from two time slices" begin
@@ -87,7 +87,7 @@ end
     temperature(u) = u[1]^(1/4) * 1.1                     # a fake equation of state
     T = [temperature(state(ti)[i, j]) for ti in t, i in eachindex(x), j in eachindex(y)]
     ux = [0.1xi for ti in t, xi in x, yi in y]
-    reference_result = surface_simplices(T, (t, x, y), 0.95; fields=(ux=ux,))
+    reference_result = grid_simplices(T, (t, x, y), 0.95; fields=(ux=ux,))
 
     @test slab_corners((10, 20, 30, 40), (11, 21, 31, 41)) == (10, 11, 20, 21, 30, 31, 40, 41)
     ref = ReferenceGrid(Val(3))
@@ -96,8 +96,8 @@ end
     for k in 2:length(t)
         u = state(t[k])
         for I in CartesianIndices(size(u) .- 1)
-            surface_simplices!(out, slab_corners(temperature, u_prev, u, I), Cell((t[k-1], t[k]), (x, y), I), 0.95;
-                             fields=(ux=slab_corners(v -> v[2], u_prev, u, I),), reference=ref)
+            cell = Cell(temperature, (u_prev, u), (t[k-1], t[k]), (x, y), I; fields=(ux = v -> v[2],))
+            surface_simplices!(out, cell, 0.95; reference=ref)
         end
         u_prev = u
     end
@@ -110,39 +110,40 @@ end
 
 @testset "Fold, callback and in-place forms agree" begin
     T = Tuple(1.0 - sum(abs2, (t, x, y, z)) for t in 0:1, x in 0:1, y in 0:1, z in 0:1)
-    cell = Cell((0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0))
     q = Tuple(2.0 + t + x for t in 0:1, x in 0:1, y in 0:1, z in 0:1)
-    simplices = surface_simplices(T, cell, 0.5; fields=(q=q,))
+    bare = Cell((0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0), T)
+    cell = Cell(bare, T; fields=(q=q,))
+    simplices = surface_simplices(cell, 0.5)
     total = sum(e.dsigma for e in simplices)
     # fold with an immutable SVector accumulator
-    @test surface_simplices((acc, e) -> acc + e.dsigma, zero(SVector{4,Float64}), T, cell, 0.5) ≈ total
+    @test surface_simplices((acc, e) -> acc + e.dsigma, zero(SVector{4,Float64}), bare, 0.5) ≈ total
     # fold with a field-weighted integrand
-    @test surface_simplices((acc, e) -> acc + e.fields.q * e.dsigma[1], 0.0, T, cell, 0.5; fields=(q=q,)) ≈
+    @test surface_simplices((acc, e) -> acc + e.fields.q * e.dsigma[1], 0.0, cell, 0.5) ≈
           sum(e.fields.q * e.dsigma[1] for e in simplices)
     # callback form sees every element once
     seen = Ref(0)
-    surface_simplices(T, cell, 0.5) do e; seen[] += 1; end
+    surface_simplices(bare, 0.5) do e; seen[] += 1; end
     @test seen[] == length(simplices)
     # in-place form appends to an existing vector
-    out = simplex_type(4, (:q,))[]; surface_simplices!(out, T, cell, 0.5; fields=(q=q,)); surface_simplices!(out, T, cell, 0.5; fields=(q=q,))
+    out = simplex_type(4, (:q,))[]; surface_simplices!(out, cell, 0.5); surface_simplices!(out, cell, 0.5)
     @test out == [simplices; simplices]
     # a cell the level does not reach returns init unchanged
-    @test surface_simplices((acc, e) -> acc + 1, 0, T, cell, 5.0) == 0
+    @test surface_simplices((acc, e) -> acc + 1, 0, cell, 5.0) == 0
 end
 
 @testset "Merged simplices" begin
     # The unit square with T = 1.5 - t: two segments merge into one, flat, element.
     square = Tuple(1.5 - t for t in 0:1, x in 0:1)
-    m = surface_element(square, Cell((0.0, 0.0), (1.0, 1.0)), 1.0)
+    m = surface_element(Cell((0.0, 0.0), (1.0, 1.0), square), 1.0)
     @test m.centroid ≈ [0.5, 0.5] && m.dsigma ≈ [1.0, 0.0] && m.area ≈ 1.0 && flatness(m) ≈ 1.0
-    @test iszero(surface_element(square, Cell((0.0, 0.0), (1.0, 1.0)), 5.0))
+    @test iszero(surface_element(Cell((0.0, 0.0), (1.0, 1.0), square), 5.0))
 
     # A curved isotherm on a non-uniform 3D grid, with an affine field.
     t = range(0.0, 1.0; length=9); x = [-1.0, -0.7, -0.5, -0.2, 0.0, 0.3, 0.6, 1.0]; y = range(-1.0, 1.0; length=7)
     T = [1.0 - ti - 0.4 * (xi^2 + yi^2) for ti in t, xi in x, yi in y]
     affine(p) = 0.3 + 2p[1] - p[2] + 0.5p[3]
     q = [affine((ti, xi, yi)) for ti in t, xi in x, yi in y]
-    simplices = surface_simplices(T, (t, x, y), 0.45; fields=(q=q,))
+    simplices = grid_simplices(T, (t, x, y), 0.45; fields=(q=q,))
 
     per_cell = surface_elements(T, (t, x, y), 0.45; fields=(q=q,))
     # dΣ and areas add up exactly
@@ -163,26 +164,19 @@ end
 
     # A block of cells merged at once, one at a time, or from its per-cell elements.
     block = CartesianIndices((2:4, 3:4, 1:2))
-    cornerTs = [cell_corners(T, I) for I in block]
-    cells = [Cell((t, x, y), I) for I in block]
-    cell_fields = [(q=cell_corners(q, I),) for I in block]
-    together = surface_element(cornerTs, cells, 0.45; fields=cell_fields)
-    one_by_one = foldl((acc, i) -> surface_element(acc, cornerTs[i], cells[i], 0.45; fields=cell_fields[i]),
-                       eachindex(cells); init=zero(element_type(3, (:q,))))
-    @test together == one_by_one
-    from_elements = foldl(merge_element, (surface_element(cornerTs[i], cells[i], 0.45; fields=cell_fields[i]) for i in eachindex(cells));
+    cells = [Cell(T, (t, x, y), I; fields=(q=q,)) for I in block]
+    together = foldl((acc, cell) -> surface_element(acc, cell, 0.45), cells; init=zero(element_type(3, (:q,))))
+    from_elements = foldl(merge_element, (surface_element(cell, 0.45) for cell in cells);
                           init=zero(element_type(3, (:q,))))
     @test from_elements.centroid ≈ together.centroid && from_elements.dsigma ≈ together.dsigma &&
           from_elements.area ≈ together.area && from_elements.fields.q ≈ together.fields.q
     @test together.fields.q ≈ affine(together.centroid)
-    @test !iszero(together) && iszero(surface_element(cornerTs, cells, 5.0; fields=cell_fields))
-    @test surface_element(cornerTs, Tuple(cells), 0.45).dsigma ≈ together.dsigma        # tuples of cells, no fields
-    @test_throws DimensionMismatch surface_element(cornerTs[1:end-1], cells, 0.45)
-    @test_throws DimensionMismatch surface_element(cornerTs, cells, 0.45; fields=cell_fields[1:end-1])
-    @test iszero(surface_element(cornerTs[1:0], cells[1:0], 0.45; fields=cell_fields[1:0]))
+    @test !iszero(together)
+    without = foldl((acc, I) -> surface_element(acc, Cell(T, (t, x, y), I), 0.45), block; init=zero(element_type(3)))
+    @test without.dsigma ≈ together.dsigma && without.centroid ≈ together.centroid      # the docstring's foldl, no fields
     # the docstring example: two unit squares stacked along x
-    two = surface_element([Tuple(1.5 - t for t in 0:1, x in 0:1) for _ in 1:2],
-                          [Cell((0.0, 0.0), (1.0, 1.0)), Cell((0.0, 1.0), (1.0, 1.0))], 1.0)
+    two = surface_element(Cell((0.0, 0.0), (1.0, 1.0), square), 1.0)
+    two = surface_element(two, Cell((0.0, 1.0), (1.0, 1.0), square), 1.0)
     @test two.centroid ≈ [0.5, 1.0] && two.dsigma ≈ [2.0, 0.0] && two.area ≈ 2.0
 end
 
@@ -257,13 +251,14 @@ end
             X = map(k -> SimplicialFreezeOut.position(cell, SimplicialFreezeOut.coordinates(k)), corners(Val(D)))
             cornerT = map(x -> c + dot(g, x), X)
             Tfo = c + dot(g, cell.origin + SVector(cell.width) / 2) + 0.2 * randn(rng) * norm(g)
-            pieces = surface_simplices(cornerT, cell, Tfo; fields=(q=map(q, X),), reference)
+            data = Cell(cell, cornerT; fields=(q=map(q, X),))
+            pieces = surface_simplices(data, Tfo; reference)
             minimum(cornerT) < Tfo < maximum(cornerT) || continue
             @test !isempty(pieces)
             @test all(abs(c + dot(g, v) - Tfo) < 1e-10 for e in pieces for v in e.vertices)
             @test all(e.dsigma ≈ -norm(e.dsigma) * g / norm(g) for e in pieces)
             @test all(e.fields.q ≈ q(e.centroid) for e in pieces)
-            e = surface_element(cornerT, cell, Tfo; fields=(q=map(q, X),), reference)
+            e = surface_element(data, Tfo; reference)
             @test flatness(e) ≈ 1 && e.fields.q ≈ q(e.centroid)
         end
     end
@@ -286,11 +281,11 @@ end
     # ellipsoid rᵀAr = R² with A = 1 - 0.3(e_t e_xᵀ + e_x e_tᵀ), all cut patterns occur.
     R² = 0.4863
     gaussian(x) = [exp(-(t^2 + a^2 + b^2 + c^2) + 0.6t * a) for t in x, a in x, b in x, c in x]
-    simplices = surface_simplices(gaussian(x), (x, x, x, x), exp(-R²))
+    simplices = grid_simplices(gaussian(x), (x, x, x, x), exp(-R²))
     @test all(==(2), face_counts(simplices))
     @test norm(sum(e.dsigma for e in simplices)) < 1e-12
     # The enclosed volume, (1/4)∮ x·dΣ, converges to the ellipsoid's at second order in h.
-    volume(x) = sum(dot(e.centroid, e.dsigma) for e in surface_simplices(gaussian(x), (x, x, x, x), exp(-R²))) / 4
+    volume(x) = sum(dot(e.centroid, e.dsigma) for e in grid_simplices(gaussian(x), (x, x, x, x), exp(-R²))) / 4
     exact = π^2 / 2 * R²^2 / sqrt(1 - 0.09)
     coarse, fine = volume(collect(range(-1.0, 1.0; length=9))) - exact, volume(x) - exact
     @test abs(fine / exact) < 0.04 && 3.5 < coarse / fine < 4.5
@@ -298,7 +293,7 @@ end
     # T = 1 - r² with grid nodes exactly at Tfo: zero-area pieces dropped, still closed.
     x = collect(range(-1.0, 1.0; length=9))
     T = [1.0 - (t^2 + a^2 + b^2 + c^2) for t in x, a in x, b in x, c in x]
-    simplices = surface_simplices(T, (x, x, x, x), 0.5)
+    simplices = grid_simplices(T, (x, x, x, x), 0.5)
     @test any(==(0.5), T)
     @test all(allunique(e.vertices) && norm(e.dsigma) > 0 for e in simplices)
     @test all(==(2), face_counts(simplices))
@@ -310,15 +305,15 @@ end
     # A node at T == Tfo is hot: a cell whose face is at Tfo and that is colder
     # beyond it holds the face; the cell on the hot side holds nothing.
     cell = Cell((0.0, 0.0), (1.0, 1.0))
-    on_face = surface_simplices((1.0, 0.5, 1.0, 0.5), cell, 1.0)
+    on_face = surface_simplices(Cell(cell, (1.0, 0.5, 1.0, 0.5)), 1.0)
     @test all(v[1] == 0 for e in on_face for v in e.vertices) && sum(e.dsigma for e in on_face) ≈ [1.0, 0.0]
-    @test isempty(surface_simplices((1.5, 1.0, 1.5, 1.0), cell, 1.0))
+    @test isempty(surface_simplices(Cell(cell, (1.5, 1.0, 1.5, 1.0)), 1.0))
     # Affine temperatures whose isotherms run through grid nodes, along faces or
     # across them: the total dΣ is continuous in Tfo, so no piece is lost or doubled.
     for D in 2:4, g in (ntuple(k -> k == 1 ? -1.0 : 0.0, D), ntuple(k -> 0.5k - 1.5, D), ntuple(k -> isodd(k) ? -1.0 : 2.0, D))
         x = collect(0.0:0.5:2.0)
         T = [dot(g, Tuple(I)) / 2 for I in CartesianIndices(ntuple(_ -> length(x), D))]
-        total(Tfo) = sum((e.dsigma for e in surface_simplices(T, ntuple(_ -> x, D), Tfo)); init=zero(SVector{D,Float64}))
+        total(Tfo) = sum((e.dsigma for e in grid_simplices(T, ntuple(_ -> x, D), Tfo)); init=zero(SVector{D,Float64}))
         for Tfo in unique(T)[2:end-1]
             @test isapprox(total(Tfo), total(Tfo + 1e-9); atol=1e-6) && isapprox(total(Tfo), total(Tfo - 1e-9); atol=1e-6)
         end
@@ -335,8 +330,8 @@ end
     # The grid form on a two-slice array is one step of a full extraction.
     t = [0.0, 0.3, 0.7]; x = [0.0, 1.0, 2.0]; y = [0.0, 0.5, 1.5, 2.0]; z = [-1.0, 0.0, 1.0]
     T = [1.2 - ti + 0.1 * (xi - yi * zi) for ti in t, xi in x, yi in y, zi in z]
-    full = surface_simplices(T, (t, x, y, z), 0.7)
-    steps = [surface_simplices(T[k:k+1, :, :, :], (t[k:k+1], x, y, z), 0.7) for k in 1:2]
+    full = grid_simplices(T, (t, x, y, z), 0.7)
+    steps = [grid_simplices(T[k:k+1, :, :, :], (t[k:k+1], x, y, z), 0.7) for k in 1:2]
     @test vcat(steps...) == full
 end
 
@@ -362,10 +357,74 @@ end
           1 + 3 * cos(2.0)
 end
 
+@testset "Many fields written into an array" begin
+    # The docstring example: corner weights of the merged element of the unit square.
+    square = Cell((0.0, 0.0), (1.0, 1.0))
+    e = surface_element(Cell(square, (1.5, 0.5, 1.5, 0.5); fields=(w=corner_weights(Val(2)),)), 1.0)
+    @test e.fields.w ≈ [0.375, 0.125, 0.125, 0.375]
+    rng = Xoshiro(5)
+    for D in 2:4
+        # A curved isotherm on a non-uniform grid, and fields that are not affine.
+        coords = ntuple(μ -> cumsum(0.1 .+ 0.2 .* rand(rng, 6)) .- 0.6, D)
+        T = [1.0 - 0.8 * sum(abs2, getindex.(coords, Tuple(I))) for I in CartesianIndices(ntuple(_ -> 6, D))]
+        fields = [randn(rng, size(T)) for _ in 1:7]
+        named = (; (Symbol(:f, k) => fields[k] for k in 1:7)...)
+        reference_result = surface_elements(T, coords, 0.7; fields=named)
+        @test !isempty(reference_result)
+        # weights sum to one and reproduce the centroid
+        ref = ReferenceGrid(Val(D)); I = CartesianIndex(ntuple(_ -> 2, D)); cell = Cell(coords, I)
+        withw = surface_element(Cell(T, coords, I; fields=(w=corner_weights(Val(D)),)), 0.7; reference=ref)
+        if !iszero(withw)
+            X = map(c -> SimplicialFreezeOut.position(cell, SimplicialFreezeOut.coordinates(c)), corners(Val(D)))
+            @test sum(withw.fields.w) ≈ 1 && sum(withw.fields.w .* X) ≈ withw.centroid
+        end
+        # the grid form gives the same elements and the same field values as fields=
+        elements = element_type(D)[]; values = Float64[]
+        @test surface_elements!(elements, values, T, coords, 0.7, fields) === elements
+        F = reshape(values, 7, :)
+        @test length(elements) == length(reference_result)
+        @test all(a.centroid ≈ b.centroid && a.dsigma ≈ b.dsigma && a.area ≈ b.area for (a, b) in zip(elements, reference_result))
+        @test all(F[k, j] ≈ reference_result[j].fields[k] for k in 1:7, j in eachindex(elements))
+        @test surface_elements!(elements, values, T, coords, 0.7, Tuple(fields)) === elements     # appends; a tuple of arrays
+        @test length(elements) == 2length(reference_result) && values[1:end÷2] == values[end÷2+1:end]
+        # one cell at a time
+        out = zeros(7); n = 0
+        for I in CartesianIndices(size(T) .- 1)
+            e = surface_element!(out, Cell(T, coords, I; fields), 0.7; reference=ref)
+            iszero(e) && (@test iszero(out); continue)
+            n += 1
+            @test e.centroid ≈ elements[n].centroid && out ≈ F[:, n]
+        end
+        @test n == length(reference_result)
+    end
+    @test_throws DimensionMismatch surface_element!(zeros(2), Cell(square, (1.5, 0.5, 1.5, 0.5); fields=[(1, 2, 3, 4)]), 1.0)
+    @test_throws DimensionMismatch surface_elements!(element_type(2)[], Float64[], zeros(3, 3), ([0.0, 1, 2], [0.0, 1, 2]), 0.5, [zeros(2, 3)])
+    # vector-valued fields in the tuple form: several fields in one pass
+    T = Tuple(1.0 - sum(abs2, I.I .- 1) for I in CartesianIndices(ntuple(_ -> 2, 4)))
+    cell = Cell((0.0, 0.0, 0.0, 0.0), (1.0, 1.0, 1.0, 1.0)); ref = ReferenceGrid(Val(4))
+    q = Tuple(randn(rng, 16)); both = map(a -> SVector(a, -2a), q)
+    scalar = surface_element(Cell(cell, T; fields=(q=q,)), 0.5; reference=ref)
+    vector = surface_element(Cell(cell, T; fields=(u=both,)), 0.5; reference=ref)
+    unnamed = surface_element(Cell(cell, T; fields=(q, both)), 0.5; reference=ref)             # a plain tuple of fields
+    @test unnamed.fields[1] ≈ scalar.fields.q && unnamed.fields[2] ≈ vector.fields.u
+    @test unnamed isa element_type(Cell(cell, T; fields=(q, both))) && zero(element_type(4, 2)).fields == (0.0, 0.0)
+    @test_throws ArgumentError surface_element(cell, 0.5)                                    # a cell without temperatures
+    @test vector.fields.u ≈ [1, -2] * scalar.fields.q
+    @test all(a.fields.u ≈ [1, -2] * b.fields.q for (a, b) in zip(surface_simplices(Cell(cell, T; fields=(u=both,)), 0.5), surface_simplices(Cell(cell, T; fields=(q=q,)), 0.5)))
+    # nothing allocated per cell
+    inplace(out, cell, ref, work) = surface_element!(out, cell, 0.5; reference=ref, weights=work)
+    out = zeros(3); many = Cell(cell, T; fields=[q, q, q]); work = zeros(16); inplace(out, many, ref, work)
+    @test (@allocated inplace(out, many, ref, work)) == 0 && out ≈ fill(scalar.fields.q, 3)
+    @test_throws DimensionMismatch surface_element!(out, many, 0.5; weights=zeros(4))
+    vec(T, cell, both, ref) = surface_element(Cell(cell, T; fields=(u=both,)), 0.5; reference=ref)
+    vec(T, cell, both, ref)
+    @test (@allocated vec(T, cell, both, ref)) == 0
+end
+
 @testset "Input checks and empty results" begin
     t = [0.0, 1.0, 2.0]; x = [0.0, 0.5, 1.0]
     T = [1.0 - ti for ti in t, xi in x]
-    for extract in (surface_simplices, surface_elements)
+    for extract in (grid_simplices, surface_elements)
         @test_throws DimensionMismatch extract(T, (t, [0.0, 1.0]), 0.5)
         @test_throws ArgumentError extract(T, (t, [0.0, 1.0, 0.5]), 0.5)
         @test_throws ArgumentError extract(T, (t, [0.0, 0.5, 0.5]), 0.5)

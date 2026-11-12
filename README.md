@@ -49,12 +49,40 @@ julia --project=examples examples/example.jl
 using SimplicialFreezeOut
 ```
 
+**One cell.** The extraction works on one grid cell at a time and takes one
+input, a `Cell`: the cell's geometry, its `2^D` corner temperatures and,
+optionally, the corner values of the fields. Using the package is a matter
+of building the cell.
+
+```julia
+cell = Cell(T, (t, x, y), I; fields=(ux=ux, uy=uy))                    # cell I of a stored grid
+cell = Cell(temperature, (u_prev, u), (t_prev, t), (x, y), I;          # between two time slices:
+            fields=(ux = s -> s.ux, uy = s -> s.uy))                   #   functions of the hydro state
+cell = Cell(origin, width, cornerT; fields=(ux=cornerux, uy=corneruy)) # by hand, from corner values
+
+ref = ReferenceGrid(Val(3))                                # once; reused for every cell
+simplices = surface_simplices(cell, Tfo; reference=ref)
+e = surface_element(cell, Tfo; reference=ref)              # the same, merged into one element
+```
+
+The caller decides how the fields come back, by the container they are in:
+
+| `fields` | result |
+|---|---|
+| NamedTuple, `(ux=…, uy=…)` | `e.fields.ux`, `e.fields.uy` |
+| tuple, `(…, …)` | `e.fields[1]`, `e.fields[2]` |
+| vector of any length, `[…, …, …]` | written into an array by `surface_element!`, see "Many fields" |
+
+The values of a field may be numbers or static vectors, e.g. `SVector(ux, uy)`
+at each corner, which interpolates several components in one pass. The grid
+functions below are the loop over all cells of a stored array.
+
 **A stored spacetime grid.** `T` is a `D`-dimensional array, time first;
 `coords` the coordinate vectors, which may be non-uniform; `fields` any
 arrays of the same shape.
 
 ```julia
-simplices = surface_simplices(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
+simplices = grid_simplices(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))
 e = simplices[1]
 e.vertices    # the D points of the simplex (a triangle in 2+1D)
 e.dsigma      # integrated area covector dΣ_μ, pointing from hot to cold
@@ -64,18 +92,17 @@ flux = integrate_surface(simplices, e -> J[1]*e.dsigma[1] + J[2]*e.dsigma[2] + J
 ```
 
 **Streaming from a hydro code.** Keep the previous and current time slices
-and loop over spatial cells. `slab_corners` gathers the `2^D` corner values
-of a cell from the two slices, applying a function to each grid value (the
-equation of state, or a field accessor); `Cell` gives the cell geometry.
+and loop over spatial cells. The `Cell` between the two slices takes a
+function of the hydro state for the temperature (the equation of state) and
+one for each field.
 
 ```julia
 ref = ReferenceGrid(Val(3))                       # once; reused for every cell
 out = simplex_type(3, (:ux,))[]                   # collects simplices of all steps
 for each time step (t_prev → t)
     for I in CartesianIndices(size(u) .- 1)
-        surface_simplices!(out, slab_corners(temperature, u_prev, u, I),
-                           Cell((t_prev, t), (x, y), I), Tfo;
-                           fields=(ux=slab_corners(v -> v.ux, u_prev, u, I),), reference=ref)
+        cell = Cell(temperature, (u_prev, u), (t_prev, t), (x, y), I; fields=(ux = s -> s.ux,))
+        surface_simplices!(out, cell, Tfo; reference=ref)
     end
 end
 ```
@@ -87,10 +114,10 @@ With `reference` passed it allocates nothing; without it, every call rebuilds
 the reference grid, which costs more than the cell itself.
 
 ```julia
-flux = surface_simplices((acc, e) -> acc + dot(J, e.dsigma), 0.0, cornerT, cell, Tfo; reference=ref)
+flux = surface_simplices((acc, e) -> acc + dot(J, e.dsigma), 0.0, cell, Tfo; reference=ref)
 
 # a Cooper–Frye spectrum accumulated into an array, one cell at a time
-surface_simplices(spectrum, cornerT, cell, Tfo; fields, reference=ref) do S, e
+surface_simplices(spectrum, cell, Tfo; reference=ref) do S, e
     for (k, p) in enumerate(momenta)
         S[k] += pdotdΣ(p, e.dsigma) * f(pdotu(p, velocity(e.fields)) / Tfo)
     end
@@ -98,9 +125,9 @@ surface_simplices(spectrum, cornerT, cell, Tfo; fields, reference=ref) do S, e
 end
 ```
 
-The other forms are special cases: `surface_simplices(f, cornerT, cell, Tfo)`
-calls `f(s)` for each simplex, `surface_simplices!(vector, ...)` pushes
-onto a vector, `surface_simplices(cornerT, cell, Tfo)` returns a fresh one.
+The other forms are special cases: `surface_simplices(f, cell, Tfo)`
+calls `f(s)` for each simplex, `surface_simplices!(vector, cell, Tfo)` pushes
+onto a vector, `surface_simplices(cell, Tfo)` returns a fresh one.
 
 **One element per cell, or per block of cells.** A cell crossed by the
 surface holds about 30 simplices in 3+1D. `surface_element` merges them into
@@ -111,12 +138,13 @@ one `SurfaceElement`, like the element Cornelius returns per cell:
 
 ```julia
 elements = surface_elements(T, (t, x, y), Tfo; fields=(ux=ux, uy=uy))   # one per cell
-e = surface_element(cornerT, cell, Tfo; fields, reference=ref)          # one cell; iszero(e) if not crossed
+e = surface_element(cell, Tfo; reference=ref)                           # one cell; iszero(e) if not crossed
 
-# a block of cells, here 4 cells in time, merged into one element
+# a block of cells, here 4 cells in time, merged into one element: add the cells one at a time
 B = CartesianIndices((1:4, 10:10, 7:7))
-e = surface_element([cell_corners(T, I) for I in B], [Cell((t, x, y), I) for I in B], Tfo;
-                    fields=[(ux=cell_corners(ux, I), uy=cell_corners(uy, I)) for I in B])
+e = foldl(B; init=zero(element_type(3, (:ux, :uy)))) do acc, I
+    surface_element(acc, Cell(T, (t, x, y), I; fields=(ux=ux, uy=uy)), Tfo; reference=ref)
+end
 ```
 
 Merging keeps the total `dΣ_μ` exactly and reproduces affine fields at the
@@ -125,9 +153,31 @@ width. Fields are averaged component by component, so rebuild nonlinear
 quantities from the averages, e.g. `u⁰` from averaged spatial components.
 `merge_element` is the fold step, and merging is associative: elements can
 be merged again, e.g. `foldl(merge_element, elements; init=zero(eltype(elements)))`,
-or cell by cell while streaming with `surface_element(acc, cornerT, cell, Tfo)`.
+or cell by cell while streaming with `surface_element(acc, cell, Tfo)`.
 `flatness(e)` is 1 for a flat element and lower for a curved one, so it
 tells whether a block was small enough to merge.
+
+**Many fields.** In a NamedTuple or a tuple, every field is an entry carried
+by each element, which suits a few fields. For many, put them in a vector
+and use the in-place forms: the elements come back without fields, and the
+values are written into an array.
+
+```julia
+elements = element_type(4)[]
+values = Float64[]
+surface_elements!(elements, values, T, (t, x, y, z), Tfo, [ux, uy, uz, pixx, pixy])   # any number of arrays
+F = reshape(values, 5, :)                  # F[k, j] is field k on element j
+
+out = zeros(5); work = zeros(2^4)          # one cell: out[k] is field k on the element
+cell = Cell(T, (t, x, y, z), I; fields=[ux, uy, uz, pixx, pixy])
+e = surface_element!(out, cell, Tfo; reference=ref, weights=work)
+```
+
+The values are the same area-weighted means as in a NamedTuple or a tuple.
+The cell's simplices are merged once into the weights of the cell's corners,
+and each field is then one weighted sum over the corners, so the cost hardly
+grows with the number of fields; it pays off from about half a dozen fields on.
+`corner_weights(Val(D))`, passed as a field, returns these weights.
 
 **Choosing the resolution.** Decimation thins the input grid; merging
 combines the output. A sensible order:
@@ -144,7 +194,9 @@ combines the output. A sensible order:
 ## Conventions
 
 - Axis 1 is time. A cell's corners are numbered like the linear index of a
-  `2×…×2` array, so `cornerT` may be such an array, a view, or a flat tuple.
+  `2×…×2` array, so the corner values given to `Cell` by hand may be such an
+  array, a view, or a flat tuple. `cell_corners` and `slab_corners` read them
+  from grid arrays; the `Cell` constructors use them.
 - A vertex with `T ≥ Tfo` counts as hot. `dΣ_μ` points from hot to cold.
 - `dΣ_μ` is the coordinate covector with no metric factor: in Milne
   coordinates multiply by `τ` at the centroid (`integrate_surface` takes a
@@ -184,7 +236,7 @@ tetrahedra.
 `test/runtests.jl` checks planar isotherms analytically, a
 closed spherical isotherm for watertightness, orientation and the divergence
 theorem, the single-cell API, streaming from two time slices, the fold
-forms, and merged elements.
+forms, merged elements, and the in-place forms for many fields.
 
 `benchmark/compare_cornelius.jl` runs Cornelius (P. Huovinen and H. Petersen,
 arXiv:1206.3371) and this module on the same 4D fields. The Cornelius source
@@ -199,7 +251,7 @@ the per-cell elements differ by about 0.7% on a 41⁴ grid. They are two
 different discretizations of the same surface, accurate to second order in
 the grid spacing `h`, and converge to the same surface integrals:
 
-| `h` | Cornelius | `surface_elements` | `surface_simplices` |
+| `h` | Cornelius | `surface_elements` | `grid_simplices` |
 |---|---|---|---|
 | 0.05 | 6.0e-3 | 5.3e-3 | 4.9e-3 |
 | 0.025 | 1.5e-3 | 1.3e-3 | 1.2e-3 |
@@ -213,7 +265,7 @@ extract; timings on the 41⁴ grid on one core of an Apple M4 Max:
 |---|---|---|
 | Cornelius | 95,448 | 0.14 s |
 | `surface_elements` | 95,448 | 0.13 s |
-| `surface_simplices` | 2,944,344 | 0.19 s |
+| `grid_simplices` | 2,944,344 | 0.19 s |
 
 ## Files
 

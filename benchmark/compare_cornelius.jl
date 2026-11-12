@@ -28,7 +28,7 @@ cube = [1.5 - t for t in 0:1, x in 0:1, y in 0:1, z in 0:1]
 dS = zeros(4, 8); Vm = zeros(4, 8); ns = Ref{Int32}(0); na = Ref{Int32}(0); nd = Ref{Int32}(0)
 n = cornelius!(1.0, cube, 1.0, 1.0, 1.0, 1.0, dS, Vm, ns, na, nd)
 println("Cornelius: ", n, " element(s), dSigma=", dS[:, 1], " centroid=", Vm[:, 1])
-simplices = surface_simplices(cube, (0.0,0.0,0.0,0.0), (1.0,1.0,1.0,1.0), 1.0)
+simplices = surface_simplices(Cell((0.0,0.0,0.0,0.0), (1.0,1.0,1.0,1.0), cube), 1.0)
 println("Simplicial: ", length(simplices), " simplices, Σ dSigma=", sum(e.dsigma for e in simplices),
         " area-weighted centroid=", sum(norm(e.dsigma) * e.centroid for e in simplices) / sum(norm(e.dsigma) for e in simplices))
 
@@ -57,7 +57,7 @@ function run_cornelius(T, x, h, Tfo)
     (; count, cells, total, vol = vol / 4)
 end
 function run_simplicial(T, x, Tfo)
-    simplices = surface_simplices(T, (x, x, x, x), Tfo)
+    simplices = grid_simplices(T, (x, x, x, x), Tfo)
     (; count = length(simplices), total = sum(e.dsigma for e in simplices), vol = sum(dot(e.centroid, e.dsigma) for e in simplices) / 4)
 end
 
@@ -94,10 +94,10 @@ function per_cell(T, x, h, Tfo)
         k == 1 || error("several Cornelius elements in one cell; not handled here")
         origin = SVector(x[I[1]], x[I[2]], x[I[3]], x[I[4]])
         push!(corn, (SVector{4}(dS[:, 1]), origin + SVector{4}(Vm[:, 1])))
-        cT = cell_corners(T, I); cell = Cell((x, x, x, x), I)
-        e = surface_element(cT, cell, Tfo; reference=ref)
+        cell = Cell(T, (x, x, x, x), I)
+        e = surface_element(cell, Tfo; reference=ref)
         push!(merged, (e.dsigma, e.centroid))
-        unmerged = surface_simplices((a, s) -> a + weight(s.centroid) * s.dsigma[1], unmerged, cT, cell, Tfo; reference=ref)
+        unmerged = surface_simplices((a, s) -> a + weight(s.centroid) * s.dsigma[1], unmerged, cell, Tfo; reference=ref)
     end
     integral(v) = sum(weight(c) * d[1] for (d, c) in v)
     (; corn, merged, Ic = integral(corn), Im = integral(merged), Iu = unmerged)
@@ -115,14 +115,14 @@ end
 
 println("\nGaussian field, not affine inside cells")
 x41 = collect(range(-1.0, 1.0; length=41)); h41 = x41[2] - x41[1]; T41 = gaussian(x41)
-count_cornelius(T41, h41, Tfo_g); surface_elements(T41, (x41, x41, x41, x41), Tfo_g); surface_simplices(T41, (x41, x41, x41, x41), Tfo_g)
+count_cornelius(T41, h41, Tfo_g); surface_elements(T41, (x41, x41, x41, x41), Tfo_g); grid_simplices(T41, (x41, x41, x41, x41), Tfo_g)
 tc = minimum(@elapsed(count_cornelius(T41, h41, Tfo_g)) for _ in 1:3)
 tm = minimum(@elapsed(surface_elements(T41, (x41, x41, x41, x41), Tfo_g)) for _ in 1:3)
-tu = minimum(@elapsed(surface_simplices(T41, (x41, x41, x41, x41), Tfo_g)) for _ in 1:3)
+tu = minimum(@elapsed(grid_simplices(T41, (x41, x41, x41, x41), Tfo_g)) for _ in 1:3)
 @printf("41^4 grid   %-28s %9s %9s\n", "", "elements", "time")
 @printf("            %-28s %9d %8.3fs\n", "Cornelius", count_cornelius(T41, h41, Tfo_g), tc)
 @printf("            %-28s %9d %8.3fs\n", "surface_elements (merged)", length(surface_elements(T41, (x41, x41, x41, x41), Tfo_g)), tm)
-@printf("            %-28s %9d %8.3fs\n", "surface_simplices", length(surface_simplices(T41, (x41, x41, x41, x41), Tfo_g)), tu)
+@printf("            %-28s %9d %8.3fs\n", "grid_simplices", length(grid_simplices(T41, (x41, x41, x41, x41), Tfo_g)), tu)
 
 results = Dict{Int,Any}()
 for n in (41, 81)
